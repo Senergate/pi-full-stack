@@ -13,7 +13,8 @@ const MqttService = {
   },
 
   createMqttClient: () => {
-    return mqtt.connect(`mqtt://${config.pi_ip}:${config.mqtt_port}`, {
+	  //return mqtt.connect(`mqtt://${config.pi_ip}:${config.mqtt_port}`, {
+    return mqtt.connect(`mqtt://localhost:${config.mqtt_port}`, {
       clientId: `senergate-server-${Math.random().toString(16).slice(2, 8)}`,
       username: MqttService._.usr,
       password: MqttService._.pwd,
