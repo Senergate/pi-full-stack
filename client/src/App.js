@@ -4,10 +4,10 @@ import { io } from 'socket.io-client';
 
 const App = {
   _: reactive({
-    sensors: {},
+    connected: false,
   }),
 
-  io: io('vigor:4000', { maxHttpBufferSize: 20 * 1024 * 1024 }),
+  io: io('localhost:4000', { maxHttpBufferSize: 20 * 1024 * 1024 }),
 
   clone: obj => {
     const clone = JSON.parse(JSON.stringify(obj));
@@ -40,13 +40,6 @@ App.io.on('connect', async () => {
     for (let func of services[name]) service[func] = async (...args) => await App.io.a_emit(name + '.' + func, args);
     App.io.on(name, (...args) => App[name].trigger(args[0], args.slice(1)));
     App[name] = service;
-  }
-
-  // sensors
-  {
-    App.SensorService.on('update', data => {
-      App._.sensors[data.mac] = data;
-    });
   }
 
   App._.connected = true;

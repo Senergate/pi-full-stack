@@ -16,15 +16,14 @@ const _ = reactive({
 
 <template>
   <q-layout view="hHh LpR fFf">
-    <Menu />
+    <!-- <Menu /> -->
     <q-page-container>
-      <Master />
+      <Master v-if="App._.connected" />
     </q-page-container>
   </q-layout>
 </template>
 
 <style>
-
 .material-symbols-outlined {
   font-variation-settings:
     'FILL' 1,
@@ -32,5 +31,4 @@ const _ = reactive({
     'GRAD' 0,
     'opsz' 24;
 }
-
 </style>

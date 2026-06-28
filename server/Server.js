@@ -2,6 +2,7 @@ import path from 'path';
 import http from 'http';
 import https from 'https';
 import express from 'express';
+import config from './config.js';
 import { Server as IOServer } from 'socket.io';
 
 const Server = {
@@ -20,7 +21,8 @@ const Server = {
   init: async services => {
     Server.io = new IOServer(Server.server, {
       cors: {
-        origin: 'http://vigor:5173',
+        // allow debug port
+        origin: `http://${config.pi_ip}:5173`,
         methods: ['GET', 'POST'],
       },
       maxHttpBufferSize: 20 * 1024 * 1024,
@@ -40,6 +42,7 @@ const Server = {
     });
 
     for (let service of services) {
+      service.server = Server;
       await service.init(Server);
       Server.services.set(service.name, service);
     }
@@ -52,11 +55,10 @@ const Server = {
     Server.server = http.Server(Server.app);
     Server.server.app = Server.app;
 
-    Server.app.use(express.static(path.resolve(process.cwd(),'../client/dist')));
+    Server.app.use(express.static(path.resolve(process.cwd(), '../client/dist')));
 
-    const port = 4000;
-    const res = await Server.server.listen(port);
-    console.log('listening *:' + port);
+    const res = await Server.server.listen(config.http_port);
+    console.log('listening *:' + config.http_port);
   },
 };
 
