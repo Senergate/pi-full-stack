@@ -2,6 +2,7 @@
 
 import Server from './Server.js';
 import MqttService from './MqttService.js';
+import PicoService from './PicoService.js';
 import EspService from './EspService.js';
 // import SensorService from './SensorService.js';
 // import TimerService from './TimerService.js';
@@ -16,6 +17,7 @@ import EspService from './EspService.js';
   await Server.init([
     MqttService,
     EspService,
+    PicoService,
     // SensorService,
     // TimerService,
     // DoorService,

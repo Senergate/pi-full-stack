@@ -10,7 +10,64 @@ const _ = reactive({
     r1: false,
     r2: false,
   },
+  pico: {
+    data: {
+      timestamp: 1782652636.6645148,
+      samples: 12000,
+      sample_rate_hz: 39111.38923654568,
+      duration_s: 0.30681600000000003,
+      fft_resolution_hz: 3.2592824363788067,
+      overflow: 0,
+      channels: {
+        A: {
+          min_mv: 0,
+          max_mv: 16.117125984251967,
+          mean_mv: 0.038949721128608915,
+          std_mv: 0.791353575657098,
+          dc_mv: 0.038949721128608915,
+          rms_mv: 0.7923115312055421,
+          ac_rms_mv: 0.791353575657098,
+          peak_frequency_hz: 6124.191697955777,
+          peak_amplitude_mv: 0.052864897313239054,
+        },
+        B: {
+          min_mv: 0,
+          max_mv: 0,
+          mean_mv: 0,
+          std_mv: 0,
+          dc_mv: 0,
+          rms_mv: 0,
+          ac_rms_mv: 0,
+          peak_frequency_hz: 0,
+          peak_amplitude_mv: 0,
+        },
+        C: {
+          min_mv: 0,
+          max_mv: 15.994094488188976,
+          mean_mv: 7.734477526246718,
+          std_mv: 7.992735562218269,
+          dc_mv: 7.734477526246718,
+          rms_mv: 11.122318300226988,
+          ac_rms_mv: 7.992735562218269,
+          peak_frequency_hz: 45.62995410930329,
+          peak_amplitude_mv: 0.5324014008282792,
+        },
+      },
+    },
+  },
 });
+
+const pico_map = {
+  min_mv: ['Minimum Voltage', 1, 'mV'],
+  max_mv: ['Maximum Voltage', 1, 'mV'],
+  mean_mv: ['Mean Voltage', 1, 'mV'],
+  std_mv: ['Standard Deviation', 1, 'mV'],
+  dc_mv: ['DC Voltage', 1, 'mV'],
+  rms_mv: ['RMS Voltage', 1, 'mV'],
+  ac_rms_mv: ['AC RMS Voltage', 1, 'mV'],
+  peak_frequency_hz: ['Peak Frequency', 1000, 'kHz'],
+  peak_amplitude_mv: ['Peak Amplitude', 1, 'mV'],
+};
 
 const test = async () => {
   // const res = await App.SomeService.test('hello');
@@ -35,119 +92,159 @@ const init = () => {
   App.EspService.on('update', data => {
     console.log(data);
   });
+
+  App.PicoService.on('data', data => {
+    Object.assign(_.pico.data, data);
+  });
 };
 
 onMounted(init);
 </script>
 
 <template>
-    <div class="container">
-      <!-- Row 1: two cards -->
+  <div class="container">
+    <!-- Row 1: two cards -->
 
-      <!-- Row 2: one card -->
-      <div class="row" style="margin: 0 0 1em 0">
-        <div class="col-12">
-          <div class="title">
-            <q-spinner-audio color="white" size="0.8em" style='margin-top:-0.3em;' />
-            <q-spinner-audio color="white" size="0.8em" style='margin-top:-0.3em;margin-left:-0.2em' />
-              SENERGATE
-          </div>
-        </div>
-      </div>
-
-      <div class="row q-col-gutter-md">
-        <div class="col-12 col-sm-6">
-          <Card>
-            <q-card-section
-              >Discovered Devices
-              <q-input v-model="_.count" label="test" />
-            </q-card-section>
-          </Card>
-        </div>
-
-        <div class="col-12 col-sm-6">
-          <Card>
-            <q-card-section>
-              <div class="text-h6">Discovered Devices</div>
-            </q-card-section>
-
-            <q-card-section class="q-pt-none">
-              <q-list>
-                <q-item>
-                  <q-item-section side>
-                    <q-icon color="secondary" name="heat_pump" size="3em" />
-                  </q-item-section>
-                  <q-item-section>
-                    <q-slider v-model="_.count" :min="0" :max="3" label color="secondary" />
-                  </q-item-section>
-                </q-item>
-                <q-item>
-                  <q-item-section side>
-                    <q-icon color="secondary" name="electric_car" size="3em" />
-                  </q-item-section>
-                  <q-item-section>
-                    <q-linear-progress
-                      rounded
-                      size="1em"
-                      stripe
-                      :value="_.wallbox.load"
-                      color="secondary"
-                    />
-                  </q-item-section>
-                  <q-item-section side>
-                    <q-toggle v-model="_.wallbox.r1" color="secondary" />
-                  </q-item-section>
-                  <q-item-section side>
-                    <q-toggle v-model="_.wallbox.r2" color="secondary" />
-                  </q-item-section>
-                </q-item>
-                <q-item>
-                  <q-item-section side>
-                    <q-icon color="secondary" name="battery_charging_full" size="3em" />
-                  </q-item-section>
-                  <q-item-section>
-                    <q-slider v-model="_.count" :min="0" :max="10" label color="secondary" />
-                  </q-item-section>
-                </q-item>
-              </q-list>
-            </q-card-section>
-          </Card>
-        </div>
-      </div>
-
-      <!-- Row 2: one card -->
-      <div class="row q-col-gutter-md q-mt-md">
-        <div class="col-12">
-          <Card>
-            <q-card-section>Card 3</q-card-section>
-          </Card>
-        </div>
-      </div>
-
-      <!-- Row 3: three cards -->
-      <div class="row q-col-gutter-md q-mt-md">
-        <div class="col-12 col-sm-4">
-          <Card>
-            <q-card-section>Card 4</q-card-section>
-          </Card>
-        </div>
-
-        <div class="col-12 col-sm-4">
-          <Card>
-            <q-card-section>Card 5</q-card-section>
-          </Card>
-        </div>
-
-        <div class="col-12 col-sm-4">
-          <Card>
-            <q-card-section>Card 6</q-card-section>
-          </Card>
+    <!-- Row 2: one card -->
+    <div class="row" style="margin: 0 0 1em 0">
+      <div class="col-12">
+        <div class="title">
+          <q-spinner-audio color="white" size="0.8em" style="margin-top: -0.3em" />
+          <q-spinner-audio color="white" size="0.8em" style="margin-top: -0.3em; margin-left: -0.2em" />
+          SENERGATE
         </div>
       </div>
     </div>
+
+    <!-- Row 2: one card -->
+    <div class="row q-col-gutter-md">
+      <div class="col-12">
+        <Card>
+          <q-card-section>Card 3</q-card-section>
+        </Card>
+      </div>
+    </div>
+
+    <div class="row q-col-gutter-md q-mt-md">
+      <div class="col-12 col-sm-6">
+        <Card>
+          <q-card-section
+            >Discovered Devices
+            <q-input v-model="_.count" label="test" />
+          </q-card-section>
+        </Card>
+      </div>
+
+      <div class="col-12 col-sm-6">
+        <Card>
+          <q-card-section>
+            <div class="text-h6">Discovered Devices</div>
+          </q-card-section>
+
+          <q-card-section class="q-pt-none">
+            <q-list>
+              <q-item>
+                <q-item-section side>
+                  <q-icon color="secondary" name="heat_pump" size="3em" />
+                </q-item-section>
+                <q-item-section>
+                  <q-slider v-model="_.count" :min="0" :max="3" label color="secondary" />
+                </q-item-section>
+              </q-item>
+              <q-item>
+                <q-item-section side>
+                  <q-icon color="secondary" name="electric_car" size="3em" />
+                </q-item-section>
+                <q-item-section>
+                  <q-linear-progress rounded size="1em" stripe :value="_.wallbox.load" color="secondary" />
+                </q-item-section>
+                <q-item-section side>
+                  <q-toggle v-model="_.wallbox.r1" color="secondary" />
+                </q-item-section>
+                <q-item-section side>
+                  <q-toggle v-model="_.wallbox.r2" color="secondary" />
+                </q-item-section>
+              </q-item>
+              <q-item>
+                <q-item-section side>
+                  <q-icon color="secondary" name="battery_charging_full" size="3em" />
+                </q-item-section>
+                <q-item-section>
+                  <q-slider v-model="_.count" :min="0" :max="10" label color="secondary" />
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </q-card-section>
+        </Card>
+      </div>
+    </div>
+
+    <div class="row q-col-gutter-md q-mt-md">
+      <div class="col-12">
+        <Card>
+          <q-card-section>
+<table class="full-width phase_table">
+          <thead>
+            <tr>
+              <th class="text-left text-spaced">PHASES</th>
+              <th class="text-right">L1</th>
+              <th class="text-right">L2</th>
+              <th class="text-right">L3</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            <tr
+              v-for="a in Object.keys(pico_map)"
+              :key="a"
+            >
+              <td>{{ pico_map[a][0] }}</td>
+
+              <td class="text-right" style='width:150px;'>
+                {{ Number.parseFloat(_.pico.data.channels.A[a] / pico_map[a][1]).toFixed(2) }}
+                {{ pico_map[a][2] }}
+              </td>
+
+              <td class="text-right" style='width:150px;'>
+                {{ Number.parseFloat(_.pico.data.channels.B[a] / pico_map[a][1]).toFixed(2) }}
+                {{ pico_map[a][2] }}
+              </td>
+
+              <td class="text-right" style='width:150px;'>
+                {{ Number.parseFloat(_.pico.data.channels.C[a] / pico_map[a][1]).toFixed(2) }}
+                {{ pico_map[a][2] }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+          </q-card-section>
+        </Card>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
+
+.phase_table {
+  color:#aab;
+  border-collapse:collapse;
+}
+
+.phase_table thead {
+  /* border:1px solid red; */
+  border-bottom:1px solid rgba(255,255,255,0.2);
+}
+
+.phase_table th {
+  color:#ccc;
+  padding: 0 0 0.5em 0;
+}
+
+.text-spaced {
+  letter-spacing: 0.2em;
+}
+
 .text-h6 {
   /* text-transform: uppercase; */
 }

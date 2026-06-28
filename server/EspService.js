@@ -13,23 +13,23 @@ const EspService = {
   init: async server => {
     const bus = EspService.server.services.get('MqttService').bus;
 
-    bus.subscribe('#', { qos: 1 }, err => {
-      if (err) {
-        console.error('Subscribe failed:', err);
-        return;
-      }
-    });
-
-    bus.on('message', (topic, message) => {
-      console.log(`Received on ${topic}:`);
-
-      try {
-        const payload = JSON.parse(message.toString());
-        console.log(payload);
-      } catch {
-        console.log(message.toString());
-      }
-    });
+    // bus.subscribe('#', { qos: 1 }, err => {
+    //   if (err) {
+    //     console.error('Subscribe failed:', err);
+    //     return;
+    //   }
+    // });
+    //
+    // bus.on('message', (topic, message) => {
+    //   console.log(`Received on ${topic}:`);
+    //
+    //   try {
+    //     const payload = JSON.parse(message.toString());
+    //     console.log(payload);
+    //   } catch {
+    //     console.log(message.toString());
+    //   }
+    // });
   },
 };
 

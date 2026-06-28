@@ -17,7 +17,7 @@ const _ = reactive({
 <template>
   <q-layout view="hHh LpR fFf">
     <!-- <Menu /> -->
-    <q-page-container>
+    <q-page-container style='padding:1em;'>
       <Master v-if="App._.connected" />
     </q-page-container>
   </q-layout>
