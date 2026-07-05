@@ -5,10 +5,13 @@ import Card from './Card.vue';
 
 const _ = reactive({
   count: 0,
+  heatpump: {
+    load: 0,
+  },
   wallbox: {
     load: 0.5,
-    r1: false,
-    r2: false,
+    r1: null,
+    r2: null,
   },
   pico: {
     data: {
@@ -69,23 +72,30 @@ const pico_map = {
   peak_amplitude_mv: ['Peak Amplitude', 1, 'mV'],
 };
 
-const test = async () => {
-  // const res = await App.SomeService.test('hello');
-  const res = await App.EspService.wallbox('hello', 2);
-  console.log(res);
-};
+// const test = async () => {
+//   // const res = await App.SomeService.test('hello');
+//   const res = await App.EspService.wallbox('hello', 2);
+//   console.log(res);
+// };
 
 const init = () => {
+  // watch(
+  //   () => _.wallbox.r1,
+  //   v => {
+  //     App.EspService.wallbox(1, v);
+  //   }
+  // );
+  // watch(
+  //   () => _.wallbox.r2,
+  //   v => {
+  //     App.EspService.wallbox(2, v);
+  //   }
+  // );
+
   watch(
-    () => _.wallbox.r1,
+    () => _.heatpump.load,
     v => {
-      App.EspService.wallbox(1, v);
-    }
-  );
-  watch(
-    () => _.wallbox.r2,
-    v => {
-      App.EspService.wallbox(2, v);
+      App.EspService.heatpump(_.heatpump.load);
     }
   );
 
@@ -96,6 +106,29 @@ const init = () => {
   App.PicoService.on('data', data => {
     Object.assign(_.pico.data, data);
   });
+  App.EspService.on('branchA', data => {
+    console.log('branchA',data)
+  });
+  App.EspService.on('branchB', data => {
+    _.wallbox.r1 = data.relay_1_on;
+    _.wallbox.r2 = data.relay_2_on;
+  });
+};
+
+const toggleBypass = ()=>{
+  App.EspService.bypass(true);
+};
+
+const toggleWallbox = r => {
+  if(r==0){
+    if(_.wallbox.r1===null) return;
+    App.EspService.wallbox(1, !_.wallbox.r1);
+    _.wallbox.r1 = null;
+  } else {
+    if(_.wallbox.r2===null) return;
+    App.EspService.wallbox(2, !_.wallbox.r2);
+    _.wallbox.r2 = null;
+  }
 };
 
 onMounted(init);
@@ -148,7 +181,7 @@ onMounted(init);
                   <q-icon color="secondary" name="heat_pump" size="3em" />
                 </q-item-section>
                 <q-item-section>
-                  <q-slider v-model="_.count" :min="0" :max="3" label color="secondary" />
+                  <q-slider v-model="_.heatpump.load" :min="0" :max="5" label color="secondary" />
                 </q-item-section>
               </q-item>
               <q-item>
@@ -159,10 +192,13 @@ onMounted(init);
                   <q-linear-progress rounded size="1em" stripe :value="_.wallbox.load" color="secondary" />
                 </q-item-section>
                 <q-item-section side>
-                  <q-toggle v-model="_.wallbox.r1" color="secondary" />
+                  <q-toggle :model-value="_.wallbox.r1" @update:model-value="()=>toggleWallbox(0)" indeterminate-value="null" color="secondary" />
                 </q-item-section>
                 <q-item-section side>
-                  <q-toggle v-model="_.wallbox.r2" color="secondary" />
+                  <q-toggle :model-value="_.wallbox.r2" @update:model-value="()=>toggleWallbox(1)" indeterminate-value="null" color="secondary" />
+                </q-item-section>
+                <q-item-section side>
+                  <q-btn label='Toggle Bypass' color="secondary" @click='toggleBypass' />
                 </q-item-section>
               </q-item>
               <q-item>

@@ -51,6 +51,10 @@ const MqttService = {
       MqttService.bus = MqttService.createMqttClient();
       MqttService.bus.on('connect', () => {
         console.log('mqtt bus connected');
+
+
+        MqttService.bus.publish(`senergate/config/branchB/compat_safety_bypass`, "0");
+
       });
     }
   },
