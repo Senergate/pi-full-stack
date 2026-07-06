@@ -18,11 +18,15 @@ const _ = reactive({
   },
 
   shelly: {
+    timedelta: null,
+    timedelta_label: null,
     lastUpdate: null,
     data: {},
   },
 
   pico: {
+    timedelta: null,
+    timedelta_label: null,
     lastUpdate: null,
     data: {
       channels: {
@@ -81,35 +85,46 @@ const shellyRows = computed(() =>
   }))
 );
 
-const ageSeconds = lastUpdate => {
-  if (!lastUpdate) return null;
-  return Math.floor((_.now - lastUpdate) / 1000);
-};
+// const ageLabel = lastUpdate => {
+//   const age = ageSeconds(lastUpdate);
+//   return age === null ? '-' : `${age}ms`;
+// };
 
-const ageLabel = lastUpdate => {
-  const age = ageSeconds(lastUpdate);
-  return age === null ? '-' : `${age}s`;
-};
+// const ageSeconds = lastUpdate => {
+//   if (!lastUpdate) return null;
+//   return Math.floor((_.now - lastUpdate));
+//   // return Math.floor((_.now - lastUpdate) / 1000);
+// };
+//
+// const ageLabel = lastUpdate => {
+//   const age = ageSeconds(lastUpdate);
+//   return age === null ? '-' : `${age}ms`;
+// };
 
-const ageClass = lastUpdate => {
-  const age = ageSeconds(lastUpdate);
-
-  if (age === null) return '';
-  if (age > 5) return 'section-stale-red';
-  if (age > 2) return 'section-stale-orange';
-
-  return '';
-};
+// const ageClass = lastUpdate => {
+//   const age = ageSeconds(lastUpdate);
+//
+//   if (age === null) return '';
+//   if (age > 5) return 'section-stale-red';
+//   if (age > 2) return 'section-stale-orange';
+//
+//   return '';
+// };
 
 const formatValue = (value, unit) => {
   if (value === undefined || value === null || Number.isNaN(value)) return '-';
   return `${Number.parseFloat(value).toFixed(2)}${unit ? ` ${unit}` : ''}`;
 };
 
+const animate = () => {
+  const now = performance.now();
+  if (_.shelly.lastUpdate) _.shelly.timedelta = (now - _.shelly.lastUpdate) / 1000;
+  if (_.pico.lastUpdate) _.pico.timedelta = (now - _.pico.lastUpdate) / 1000;
+  requestAnimationFrame(animate);
+};
+
 const init = () => {
-  clock = setInterval(() => {
-    _.now = Date.now();
-  }, 500);
+  requestAnimationFrame(animate);
 
   watch(
     () => _.heatpump.load,
@@ -120,12 +135,12 @@ const init = () => {
 
   App.ShellyService.on('data', data => {
     Object.assign(_.shelly.data, data);
-    _.shelly.lastUpdate = Date.now();
+    _.shelly.lastUpdate = performance.now();
   });
 
   App.PicoService.on('data', data => {
     Object.assign(_.pico.data, data);
-    _.pico.lastUpdate = Date.now();
+    _.pico.lastUpdate = performance.now();
   });
 
   App.EspService.on('branchA', data => {
@@ -135,6 +150,7 @@ const init = () => {
   App.EspService.on('branchB', data => {
     _.wallbox.r1 = data.relay_1_on;
     _.wallbox.r2 = data.relay_2_on;
+    _.wallbox.load = (_.wallbox.r1 ? 1 : 0) * 1 + (_.wallbox.r2 ? 1 : 0) * 2;
   });
 };
 
@@ -155,10 +171,6 @@ const toggleWallbox = r => {
 };
 
 onMounted(init);
-
-onUnmounted(() => {
-  if (clock) clearInterval(clock);
-});
 </script>
 
 <template>
@@ -263,8 +275,13 @@ onUnmounted(() => {
               </thead>
 
               <tbody>
-                <tr class="section-row" :class="ageClass(_.pico.lastUpdate)">
-                  <td colspan="4">Pico ({{ ageLabel(_.pico.lastUpdate) }})</td>
+                <tr
+                  class="section-row"
+                  :class="!_.pico.lastUpdate || _.pico.timedelta > 1.1 ? 'section-stale-red' : 'section-stale-orange'"
+                >
+                  <td colspan="4">
+                    Pico [{{ _.pico.lastUpdate ? `${_.pico.timedelta.toFixed(1)}s` : 'disconnected' }}]
+                  </td>
                 </tr>
 
                 <tr v-for="row in picoRows" :key="`pico-${row.label}`">
@@ -278,8 +295,15 @@ onUnmounted(() => {
                   <td colspan="4"></td>
                 </tr>
 
-                <tr class="section-row" :class="ageClass(_.shelly.lastUpdate)">
-                  <td colspan="4">Shelly ({{ ageLabel(_.shelly.lastUpdate) }})</td>
+                <tr
+                  class="section-row"
+                  :class="
+                    !_.shelly.lastUpdate || _.shelly.timedelta > 1.5 ? 'section-stale-red' : 'section-stale-orange'
+                  "
+                >
+                  <td colspan="4">
+                    Shelly [{{ _.shelly.lastUpdate ? `${_.shelly.timedelta.toFixed(1)}s` : 'disconnected' }}]
+                  </td>
                 </tr>
 
                 <tr v-for="row in shellyRows" :key="`shelly-${row.label}`">
@@ -326,7 +350,6 @@ onUnmounted(() => {
   padding-bottom: 0.4em;
   color: #ccc;
   font-weight: bold;
-  text-transform: uppercase;
   letter-spacing: 0.12em;
 }
 
@@ -336,7 +359,7 @@ onUnmounted(() => {
 }
 
 .section-stale-orange td {
-  color: orange;
+  color: var(--q-secondary);
 }
 
 .section-stale-red td {
