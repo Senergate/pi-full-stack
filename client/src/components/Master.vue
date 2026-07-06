@@ -13,6 +13,11 @@ const _ = reactive({
     r1: null,
     r2: null,
   },
+  shelly: {
+    data: {
+
+    }
+  },
   pico: {
     data: {
       timestamp: 1782652636.6645148,
@@ -101,6 +106,10 @@ const init = () => {
 
   App.EspService.on('update', data => {
     console.log(data);
+  });
+  App.ShellyService.on('data', data => {
+    Object.assign(_.shelly.data, data);
+    console.log(_.shelly.data)
   });
 
   App.PicoService.on('data', data => {
