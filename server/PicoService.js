@@ -1,5 +1,3 @@
-const mqtt = () => PicoService.server.services.get('MqttService').bus;
-
 const PicoService = {
   name: 'PicoService',
 
