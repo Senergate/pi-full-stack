@@ -7,7 +7,7 @@ const App = {
     connected: false,
   }),
 
-  io: io('192.168.178.202:4000', { maxHttpBufferSize: 20 * 1024 * 1024 }),
+  io: io('192.168.8.101:4000', { maxHttpBufferSize: 20 * 1024 * 1024 }),
 
   clone: obj => {
     const clone = JSON.parse(JSON.stringify(obj));

@@ -6,7 +6,6 @@ const EspService = {
   heatpump: async (load) => {
     console.log('heatpump->', load);
     const bus = EspService.server.services.get('MqttService').bus;
-    // bus.publish(`heatpump/vfd/control`, `start,${load*10}`);
     bus.publish(`heatpump/vfd/control`, `start,${load*10}`);
     return { x: 5 };
   },
