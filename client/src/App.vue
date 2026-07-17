@@ -1,7 +1,7 @@
 <script setup>
 import App from './App.js';
 import { reactive } from 'vue';
-import Master from './components/Master.vue';
+import MainDashboard from './components/MainDashboard.vue';
 import Menu from './components/Menu.vue';
 
 import { useQuasar } from 'quasar';
@@ -18,7 +18,7 @@ const _ = reactive({
   <q-layout view="hHh LpR fFf">
     <!-- <Menu /> -->
     <q-page-container style='padding:1em;'>
-      <Master v-if="App._.connected" />
+      <MainDashboard v-if="App._.connected" />
     </q-page-container>
   </q-layout>
 </template>
