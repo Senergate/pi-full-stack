@@ -2,6 +2,190 @@ const PhasorCalculator = {
   // Return the magnitude of a complex number.
   complexMagnitude: value => Math.hypot(value.re, value.im),
 
+  // Subtract two complex numbers.
+  complexSubtract: (a, b) => ({
+    re: a.re - b.re,
+    im: a.im - b.im,
+  }),
+
+  // Convert PF into the load angle phi in degrees.
+  // For the prototype we assume an inductive load, so current lags voltage.
+  powerFactorToAngle: pf => {
+    const value = Number(pf);
+
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+
+    const clamped = Math.max(-1, Math.min(1, value));
+
+    return (Math.acos(clamped) * 180) / Math.PI;
+  },
+
+  // Build current phasors from measured RMS currents and PF values.
+  //
+  // Voltage reference angles:
+  // L1 =   0 deg
+  // L2 = -120 deg
+  // L3 = +120 deg
+  //
+  // For an inductive load:
+  // I_angle = V_angle - acos(PF)
+  buildCurrentPhasorsFromPF: (currents, powerFactors = { a: 1, b: 1, c: 1 }) => {
+    const baseAngles = {
+      a: 0,
+      b: -120,
+      c: 120,
+    };
+
+    const result = {};
+
+    for (const phase of ['a', 'b', 'c']) {
+      const current = Number(currents?.[phase] ?? 0);
+      const pf = Number(powerFactors?.[phase] ?? 1);
+
+      const phi = PhasorCalculator.powerFactorToAngle(pf);
+      const angle = baseAngles[phase] - phi;
+
+      result[phase] = PhasorCalculator.polarToComplex(current, angle);
+    }
+
+    return result;
+  },
+
+  // Build the assumed balanced source-voltage system.
+  buildSourceVoltagePhasors: (voltages = { a: 230, b: 230, c: 230 }, angles = { a: 0, b: -120, c: 120 }) => ({
+    a: PhasorCalculator.polarToComplex(Number(voltages.a), Number(angles.a)),
+
+    b: PhasorCalculator.polarToComplex(Number(voltages.b), Number(angles.b)),
+
+    c: PhasorCalculator.polarToComplex(Number(voltages.c), Number(angles.c)),
+  }),
+
+  // Build complex line impedances Z = R + jX.
+  buildLineImpedances: (resistance, reactance = { a: 0, b: 0, c: 0 }) => ({
+    a: {
+      re: Number(resistance?.a ?? 0),
+      im: Number(reactance?.a ?? 0),
+    },
+
+    b: {
+      re: Number(resistance?.b ?? 0),
+      im: Number(reactance?.b ?? 0),
+    },
+
+    c: {
+      re: Number(resistance?.c ?? 0),
+      im: Number(reactance?.c ?? 0),
+    },
+  }),
+
+  // Calculate dV = Z * I for each phase.
+  computeVoltageDrops: (currentPhasors, impedances) => ({
+    a: PhasorCalculator.complexMultiply(impedances.a, currentPhasors.a),
+
+    b: PhasorCalculator.complexMultiply(impedances.b, currentPhasors.b),
+
+    c: PhasorCalculator.complexMultiply(impedances.c, currentPhasors.c),
+  }),
+
+  // Calculate simulated load-node voltages:
+  //
+  // V_load = V_source - Z * I
+  computeLoadVoltages: (sourceVoltages, voltageDrops) => ({
+    a: PhasorCalculator.complexSubtract(sourceVoltages.a, voltageDrops.a),
+
+    b: PhasorCalculator.complexSubtract(sourceVoltages.b, voltageDrops.b),
+
+    c: PhasorCalculator.complexSubtract(sourceVoltages.c, voltageDrops.c),
+  }),
+
+  // Compute VUF from positive- and negative-sequence voltage.
+  computeVUF: sequenceComponents => {
+    const positiveSequenceMagnitude = PhasorCalculator.complexMagnitude(sequenceComponents.positive);
+
+    const negativeSequenceMagnitude = PhasorCalculator.complexMagnitude(sequenceComponents.negative);
+
+    if (positiveSequenceMagnitude <= Number.EPSILON) {
+      return {
+        vufPercent: null,
+        positiveSequenceMagnitude,
+        negativeSequenceMagnitude,
+        error: 'Positive-sequence voltage magnitude is too small to calculate VUF.',
+      };
+    }
+
+    return {
+      vufPercent: (negativeSequenceMagnitude / positiveSequenceMagnitude) * 100,
+
+      positiveSequenceMagnitude,
+      negativeSequenceMagnitude,
+      error: null,
+    };
+  },
+
+  // Complete VUF calculation chain.
+  analyzeVUF: ({
+    currents,
+    powerFactors = { a: 1, b: 1, c: 1 },
+
+    sourceVoltages = {
+      a: 230,
+      b: 230,
+      c: 230,
+    },
+
+    sourceAngles = {
+      a: 0,
+      b: -120,
+      c: 120,
+    },
+
+    resistance = {
+      a: 0.03,
+      b: 0.03,
+      c: 0.03,
+    },
+
+    reactance = {
+      a: 0,
+      b: 0,
+      c: 0,
+    },
+  }) => {
+    const currentPhasors = PhasorCalculator.buildCurrentPhasorsFromPF(currents, powerFactors);
+
+    const sourceVoltagePhasors = PhasorCalculator.buildSourceVoltagePhasors(sourceVoltages, sourceAngles);
+
+    const impedances = PhasorCalculator.buildLineImpedances(resistance, reactance);
+
+    const voltageDrops = PhasorCalculator.computeVoltageDrops(currentPhasors, impedances);
+
+    const loadVoltagePhasors = PhasorCalculator.computeLoadVoltages(sourceVoltagePhasors, voltageDrops);
+
+    // Reuse the existing generic symmetrical-component function.
+    const sequenceComponents = PhasorCalculator.computeSequenceComponents(loadVoltagePhasors);
+
+    const vuf = PhasorCalculator.computeVUF(sequenceComponents);
+
+    return {
+      ...vuf,
+
+      currentPhasors,
+      sourceVoltagePhasors,
+      impedances,
+      voltageDrops,
+      loadVoltagePhasors,
+      sequenceComponents,
+
+      loadVoltageMagnitudes: {
+        a: PhasorCalculator.complexMagnitude(loadVoltagePhasors.a),
+        b: PhasorCalculator.complexMagnitude(loadVoltagePhasors.b),
+        c: PhasorCalculator.complexMagnitude(loadVoltagePhasors.c),
+      },
+    };
+  },
+
   // Add two complex numbers.
   complexAdd: (a, b) => ({
     re: a.re + b.re,
