@@ -32,7 +32,7 @@ const _ = reactive({
   count: 0,
   heatpump: { load: 0 },
   wallbox: { load: -1, r0: null, r1: null },
-  battery: { discharging: false },
+  battery: { charging: false },
   energy_meter: { timedelta: null, lastUpdate: null, data: {} },
   vuf: {
     scenario: 'realistic',
@@ -100,9 +100,7 @@ const currentVuf = computed(() => {
   return Number.isFinite(value) ? value : 0;
 });
 
-const heatpumpLevel = computed(() =>
-  clampInt((Number(_.heatpump.load) || 0) * HEATPUMP_LEVELS, 0, 5)
-);
+const heatpumpLevel = computed(() => clampInt((Number(_.heatpump.load) || 0) * HEATPUMP_LEVELS, 0, 5));
 
 const wallboxLevel = computed(() => {
   if (_.wallbox.r0 === null || _.wallbox.r1 === null) {
@@ -111,41 +109,30 @@ const wallboxLevel = computed(() => {
   return (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
 });
 
-const batteryCharging = computed(() => _.battery.discharging !== true);
-
 const agentDeviceStates = computed(() => ({
   heatpump: heatpumpLevel.value,
   wallbox: wallboxLevel.value,
-  batteryCharging: batteryCharging.value,
+  batteryCharging: _.battery.charging,
 }));
 
 const wallboxCurrentForLevel = level => {
   const normalized = clampInt(level, 0, 3);
-  return (
-    ((normalized & 1) ? WALLBOX_R0_CURRENT : 0) +
-    ((normalized & 2) ? WALLBOX_R1_CURRENT : 0)
-  );
+  return (normalized & 1 ? WALLBOX_R0_CURRENT : 0) + (normalized & 2 ? WALLBOX_R1_CURRENT : 0);
 };
 
-const heatpumpCurrentForLevel = level =>
-  clampInt(level, 0, 5) * (HEATPUMP_MAX_CURRENT / HEATPUMP_LEVELS);
+const heatpumpCurrentForLevel = level => clampInt(level, 0, 5) * (HEATPUMP_MAX_CURRENT / HEATPUMP_LEVELS);
 
-const batteryCurrentForState = charging => charging ? BATTERY_CHARGE_CURRENT : 0;
+const batteryCurrentForState = charging => (charging ? BATTERY_CHARGE_CURRENT : 0);
 
 const predictVufForDeviceState = candidate => {
   const currents = { ...measuredCurrents.value };
 
-  currents.a +=
-    heatpumpCurrentForLevel(candidate.heatpump) -
-    heatpumpCurrentForLevel(agentDeviceStates.value.heatpump);
+  currents.a += heatpumpCurrentForLevel(candidate.heatpump) - heatpumpCurrentForLevel(agentDeviceStates.value.heatpump);
 
-  currents.b +=
-    wallboxCurrentForLevel(candidate.wallbox) -
-    wallboxCurrentForLevel(agentDeviceStates.value.wallbox);
+  currents.b += wallboxCurrentForLevel(candidate.wallbox) - wallboxCurrentForLevel(agentDeviceStates.value.wallbox);
 
   currents.c +=
-    batteryCurrentForState(candidate.batteryCharging) -
-    batteryCurrentForState(agentDeviceStates.value.batteryCharging);
+    batteryCurrentForState(candidate.batteryCharging) - batteryCurrentForState(agentDeviceStates.value.batteryCharging);
 
   currents.a = Math.max(0, currents.a);
   currents.b = Math.max(0, currents.b);
@@ -186,9 +173,7 @@ const applyAgentDeviceState = state => {
     App.WallboxService.set(1, targetR1);
   }
 
-  if (batteryCharging.value !== targetBatteryCharging) {
-    App.BatteryService.set(targetBatteryCharging);
-  }
+  App.BatteryService.set(targetBatteryCharging);
 };
 
 const onAgentEnabledChange = enabled => {
@@ -232,7 +217,9 @@ const onWallbox = data => {
 };
 
 const onBattery = data => {
-  _.battery.discharging = data.output === true;
+  console.log('x',data.output)
+  _.battery.charging = data.output === true;
+  console.log('x',_.battery.charging)
 };
 
 const toggleWallbox = r => {
@@ -301,21 +288,15 @@ onUnmounted(() => {
   <div class="dashboard">
     <header class="topbar">
       <div>
-        <h1 style='font-size:3em;padding:0;line-height: 2em;margin-bottom:-0.4em;'>SENERGATE</h1>
-        <p style='font-size:1em;padding-bottom:1em'>Smart Energy Gateway · Frontstage</p>
+        <h1 style="font-size: 3em; padding: 0; line-height: 2em; margin-bottom: -0.4em">SENERGATE</h1>
+        <p style="font-size: 1em; padding-bottom: 1em">Smart Energy Gateway · Dashboard</p>
       </div>
     </header>
 
     <div class="overview-grid">
-      <CurrentCard
-        :currents="measuredCurrents"
-        :y-range="{ min: 0, max: 100 }"
-      />
+      <CurrentCard :currents="measuredCurrents" :y-range="{ min: 0, max: 200 }" />
 
-      <PhasorCard
-        :voltages="measuredVoltages"
-        :angles="_.vuf.sourceAngle"
-      />
+      <PhasorCard :voltages="measuredVoltages" :angles="_.vuf.sourceAngle" />
 
       <VufCard :vuf="currentVuf" />
     </div>
@@ -341,7 +322,11 @@ onUnmounted(() => {
         <button type="button" :class="{ selected: _.vuf.scenario === 'ideal' }" @click="selectScenario('ideal')">
           Ideal
         </button>
-        <button type="button" :class="{ selected: _.vuf.scenario === 'realistic' }" @click="selectScenario('realistic')">
+        <button
+          type="button"
+          :class="{ selected: _.vuf.scenario === 'realistic' }"
+          @click="selectScenario('realistic')"
+        >
           Realistic
         </button>
       </span>
@@ -350,5 +335,108 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.simulated{border-color:#65455c;color:#ffc2e5}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}}@media(max-width:700px){.dashboard{padding:10px}.topbar,.footer-meta{flex-direction:column;align-items:flex-start}}
+.dashboard {
+  max-width: 1540px;
+  margin: 0 auto;
+  padding: 20px;
+  color: #eaf6ff;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 5px 20px;
+  border: 1px solid #1b3a4e;
+  border-radius: 20px;
+  background: rgba(7, 19, 31, 0.82);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+}
+.topbar h1 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.28em;
+}
+.topbar p {
+  margin: 4px 0 0;
+  color: #83a7bd;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.topbar-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chip {
+  padding: 6px 9px;
+  border: 1px solid #284b60;
+  border-radius: 999px;
+  color: #a7c8d8;
+  font-size: 10px;
+}
+.chip.measured {
+  border-color: #2b6f62;
+  color: #8ff1c3;
+}
+.chip.simulated {
+  border-color: #65455c;
+  color: #ffc2e5;
+}
+.chip.active {
+  border-color: #2b6f62;
+  color: #8ff1c3;
+}
+.section,
+.agent-section {
+  margin-top: 14px;
+}
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+  align-items: stretch;
+}
+.overview-grid > * {
+  min-width: 0;
+}
+.footer-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 0 4px;
+  color: #6f91a3;
+  font-size: 10px;
+}
+.footer-meta button {
+  margin-left: 5px;
+  padding: 4px 8px;
+  border: 1px solid #284b60;
+  border-radius: 999px;
+  color: #8daec0;
+  background: #081721;
+  cursor: pointer;
+}
+.footer-meta button.selected {
+  border-color: #58e7ff;
+  color: #eaf6ff;
+}
+@media (max-width: 1100px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 700px) {
+  .dashboard {
+    padding: 10px;
+  }
+  .topbar,
+  .footer-meta {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
 </style>

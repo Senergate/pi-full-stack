@@ -1,8 +1,9 @@
 const BatteryService = {
   name: 'BatteryService',
-  set: (discharging) => {
+  set: (charging) => {
     const bus = BatteryService.server.services.get('MqttService').bus;
-    bus.publish(`shelly-battery/command/switch:0`, discharging ? 'on' : 'off');
+    console.log('battery -> ', charging)
+    bus.publish(`shelly-battery/command/switch:0`, charging ? 'on' : 'off');
   },
   requestUpdate: () => {
     const bus = BatteryService.server.services.get('MqttService').bus;
