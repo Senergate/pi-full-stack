@@ -14,7 +14,7 @@ const _ = reactive({
   count: 0,
   heatpump: { load: 0 },
   wallbox: { load: -1, r0: null, r1: null },
-  battery: { load: 0.8, discharging: false },
+  battery: { load: 0.8, charging: false },
   energy_meter: {
     timedelta: null,
     lastUpdate: null,
@@ -158,7 +158,7 @@ const onWallbox = data => {
 
 const onBattery = data => {
   console.log('battery', data.output);
-  _.battery.discharging = data.output;
+  _.battery.charging = data.output;
 };
 
 const toggleWallbox = r => {

@@ -7,17 +7,10 @@
       </div>
 
       <button type="button" class="control-toggle" :class="{ enabled: autoEnabled }" @click="toggleAuto">
-        <span class="toggle-track">
-          <span class="toggle-knob" />
-        </span>
-
+        <span class="toggle-track"><span class="toggle-knob" /></span>
         <span>
-          <strong>
-            {{ autoEnabled ? 'AI CONTROL ON' : 'AI CONTROL OFF' }}
-          </strong>
-          <small>
-            {{ autoEnabled ? 'Automatic phase balancing' : 'Operator control' }}
-          </small>
+          <strong>{{ autoEnabled ? 'AI CONTROL ON' : 'AI CONTROL OFF' }}</strong>
+          <small>{{ autoEnabled ? 'Automatic phase balancing' : 'Operator control' }}</small>
         </span>
       </button>
     </div>
@@ -25,33 +18,28 @@
     <div class="status-grid">
       <div class="panel">
         <div class="panel-label">Grid condition</div>
-
         <div class="condition">
           <span class="dot" :class="condition.className" />
-          <strong :class="condition.className">
-            {{ condition.label }}
-          </strong>
+          <strong :class="condition.className">{{ condition.label }}</strong>
         </div>
-
         <div class="vuf-value">
-          <span>{{ formatVuf(vuf) }}</span>
+          <span>
+            {{ formatVuf(vuf) }}
+          </span>
 
           <span v-if="agentState === 'adjusting' && prediction" class="vuf-prediction">
-            ({{ formatVuf(prediction.vuf) }} predicted)
+            ({{ formatVuf(prediction.vuf) }})
           </span>
         </div>
-
         <div class="thresholds">Balanced &lt; 1% · Warning 1–2% · Critical &gt; 2%</div>
       </div>
 
       <div class="panel">
         <div class="panel-label">Agent state</div>
-
         <div class="condition">
           <span class="dot" :class="agentState" />
           <strong>{{ agentState.toUpperCase() }}</strong>
         </div>
-
         <p>{{ agentStateDescription }}</p>
 
         <div v-if="agentState === 'adjusting'" class="cooldown">
@@ -59,7 +47,6 @@
             <span>Next VUF check</span>
             <strong>{{ cooldownRemaining.toFixed(1) }} s</strong>
           </div>
-
           <div class="cooldown-track">
             <div class="cooldown-fill" :style="{ width: `${cooldownProgress}%` }" />
           </div>
@@ -69,95 +56,126 @@
 
     <div class="section-head">
       <div>
-        <div class="panel-label">Discovered Devices</div>
+        <div class="panel-label">Control decision</div>
+        <h3>{{ prediction ? 'Selected device state' : 'Current device state' }}</h3>
       </div>
-
-      <span v-if="hasPendingDevice" class="badge pending-badge"> COMMAND PENDING </span>
+      <span v-if="prediction" class="badge">PREDICTED</span>
+      <span v-else-if="hasPendingDevice" class="badge pending-badge">COMMAND PENDING</span>
     </div>
 
     <div class="devices">
+      <!-- Heat pump -->
       <div class="device" :class="{ pending: pendingDevices.heatpump }">
         <div class="device-head">
           <span>Heat pump</span>
           <span>L1</span>
         </div>
 
-        <!-- <div class="device-value"> -->
-        <!--   {{ normalizedDeviceStates.heatpump }} -->
-        <!--   <small>/ 5</small> -->
-        <!-- </div> -->
+        <div class="device-value">
+          {{ displayedState.heatpump }}
+          <small>/ 5</small>
+        </div>
+        <small v-if="pendingDevices.heatpump" class="pending-note">pending → {{ pendingTargetState.heatpump }}/5</small>
 
-        <div class="segments" style="padding-top: 1.5em">
+        <div class="segments">
           <button
-            v-for="level in [0, 1, 2, 3, 4, 5]"
+            v-for="level in 5"
             :key="level"
             type="button"
             class="level-button"
             :class="{
-              active: level <= normalizedDeviceStates.heatpump,
-              'power-on': level === 0 && normalizedDeviceStates.heatpump > 0,
-              'power-off': level === 0 && normalizedDeviceStates.heatpump === 0,
+              active: level <= displayedState.heatpump,
             }"
-            :title="`Set heatpump to level ${level}`"
+            :disabled="autoEnabled"
+            :title="`Set heat pump to level ${level}`"
             @click="setDeviceState('heatpump', level)"
-          >
-            {{ level === 0 ? 'OFF' : '' }}
-          </button>
+          />
         </div>
+
+        <button
+          type="button"
+          class="off-button"
+          :class="{ active: displayedState.heatpump === 0 }"
+          :disabled="autoEnabled"
+          @click="setDeviceState('heatpump', 0)"
+        >
+          OFF
+        </button>
+
+        <button
+          type="button"
+          class="off-button zero-hold-button"
+          :disabled="autoEnabled"
+          title="Keep Branch A in ZERO_HOLD: start,0 instead of stop,0"
+          @click="requestHeatpumpZeroHold"
+        >
+          ZERO HOLD
+        </button>
       </div>
 
+      <!-- Wallbox -->
       <div class="device" :class="{ pending: pendingDevices.wallbox }">
         <div class="device-head">
           <span>Wallbox</span>
           <span>L2</span>
         </div>
 
-        <!-- <div class="device-value"> -->
-        <!--   {{ normalizedDeviceStates.wallbox }} -->
-        <!--   <small>/ 3</small> -->
-        <!-- </div> -->
+        <div class="device-value">
+          {{ displayedState.wallbox }}
+          <small>/ 3</small>
+        </div>
+        <small v-if="pendingDevices.wallbox" class="pending-note">pending → {{ pendingTargetState.wallbox }}/3</small>
 
-        <div class="segments" style="padding-top: 1.5em">
+        <div class="segments three">
           <button
-            v-for="level in [0, 1, 2, 3]"
+            v-for="level in 3"
             :key="level"
             type="button"
             class="level-button"
             :class="{
-              active: level <= normalizedDeviceStates.wallbox,
-              'power-on': level === 0 && normalizedDeviceStates.wallbox > 0,
-              'power-off': level === 0 && normalizedDeviceStates.wallbox === 0,
+              active: level <= displayedState.wallbox,
             }"
+            :disabled="autoEnabled"
             :title="`Set wallbox to level ${level}`"
             @click="setDeviceState('wallbox', level)"
-          >
-            {{ level === 0 ? 'OFF' : '' }}
-          </button>
+          />
         </div>
+
+        <button
+          type="button"
+          class="off-button"
+          :class="{ active: displayedState.wallbox === 0 }"
+          :disabled="autoEnabled"
+          @click="setDeviceState('wallbox', 0)"
+        >
+          OFF
+        </button>
       </div>
 
+      <!-- Battery -->
       <div class="device" :class="{ pending: pendingDevices.batteryCharging }">
         <div class="device-head">
           <span>Battery charging</span>
           <span>L3</span>
         </div>
 
-        <div class="segments" style="padding-top: 1.5em">
-          <button
-            type="button"
-            class="binary clickable level-button"
-            :class="{ on: normalizedDeviceStates.batteryCharging }"
-            @click="setDeviceState('batteryCharging', !normalizedDeviceStates.batteryCharging)"
-          >
-            {{ normalizedDeviceStates.batteryCharging ? 'ON' : 'OFF' }}
-          </button>
-        </div>
+        <button
+          type="button"
+          class="binary clickable"
+          :class="{ on: displayedState.batteryCharging }"
+          :disabled="autoEnabled"
+          @click="setDeviceState('batteryCharging', !normalizedDeviceStates.batteryCharging)"
+        >
+          {{ displayedState.batteryCharging ? 'ON' : 'OFF' }}
+        </button>
+        <small v-if="pendingDevices.batteryCharging" class="pending-note">pending → {{ pendingTargetState.batteryCharging ? 'ON' : 'OFF' }}</small>
       </div>
     </div>
 
     <div class="section-head">
       <div>
-        <div class="panel-label">Decision Log</div>
+        <div class="panel-label">Agent activity</div>
+        <h3>Decision log</h3>
       </div>
       <span class="badge">{{ logs.length }} events</span>
     </div>
@@ -168,7 +186,6 @@
       <div v-for="entry in logs" :key="entry.id" class="log-entry">
         <time>{{ entry.time }}</time>
         <span class="log-dot" :class="entry.type" />
-
         <div>
           <strong>{{ entry.title }}</strong>
           <p v-if="entry.message">{{ entry.message }}</p>
@@ -181,6 +198,12 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 
+/*
+ * ============================================================
+ * CONFIG
+ * ============================================================
+ */
+
 const CRITICAL_VUF = 2.0;
 const SETTLE_TIME_MS = 5000;
 const TICK_MS = 250;
@@ -188,7 +211,34 @@ const MIN_IMPROVEMENT = 0.01;
 
 const MAX_HEATPUMP = 5;
 const MAX_WALLBOX = 3;
+
+/*
+ * A running proportional device should not be reduced below
+ * 50% of its maximum before we first try compensation by
+ * activating another device.
+ *
+ * Wallbox:
+ * max = 3
+ * 50% = 1.5
+ *
+ * 3 -> 2  allowed
+ * 2 -> 1  crosses below 50%, so compensation is tried instead.
+ *
+ * Heat pump:
+ * max = 5
+ * 50% = 2.5
+ *
+ * 5 -> 4  allowed
+ * 4 -> 3  allowed
+ * 3 -> 2  crosses below 50%.
+ */
 const MIN_LOAD_RATIO = 0.5;
+
+/*
+ * ============================================================
+ * PROPS / EVENTS
+ * ============================================================
+ */
 
 const props = defineProps({
   vuf: {
@@ -196,49 +246,62 @@ const props = defineProps({
     required: true,
   },
 
+  /*
+   * {
+   *   heatpump: 0..5,
+   *   wallbox: 0..3,
+   *   batteryCharging: boolean
+   * }
+   */
   deviceStates: {
     type: Object,
     required: true,
   },
 
+  /*
+   * candidate => predicted VUF
+   *
+   * May return Number or Promise<Number>.
+   */
   predictVuf: {
     type: Function,
     required: true,
   },
 });
 
-const emit = defineEmits(['apply-state', 'enabled-change']);
+const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold']);
+
+/*
+ * ============================================================
+ * STATE
+ * ============================================================
+ */
 
 const autoEnabled = ref(false);
+
 const agentState = ref('inactive');
+
 const prediction = ref(null);
+
 const logs = ref([]);
+
 const logContainer = ref(null);
+
 const cooldownUntil = ref(0);
+
 const now = ref(Date.now());
+
 const evaluating = ref(false);
+
 const timer = ref(null);
+
 const logId = ref(0);
 
 /*
- * Pending state is visual only.
- * The UI always keeps showing the latest REPORT from the devices.
+ * ============================================================
+ * DEVICE STATE
+ * ============================================================
  */
-const pendingDevices = reactive({
-  heatpump: false,
-  wallbox: false,
-  batteryCharging: false,
-});
-
-const pendingFromState = reactive({
-  heatpump: null,
-  wallbox: null,
-  batteryCharging: null,
-});
-
-const hasPendingDevice = computed(
-  () => pendingDevices.heatpump || pendingDevices.wallbox || pendingDevices.batteryCharging
-);
 
 const clampInt = (value, min, max) => {
   const numeric = Number(value);
@@ -250,10 +313,6 @@ const clampInt = (value, min, max) => {
   return Math.max(min, Math.min(max, Math.round(numeric)));
 };
 
-/*
- * This is the only state used to render the device controls.
- * It always reflects the latest value reported by SimpleDashboard.
- */
 const normalizedDeviceStates = computed(() => ({
   heatpump: clampInt(props.deviceStates?.heatpump, 0, MAX_HEATPUMP),
 
@@ -262,60 +321,60 @@ const normalizedDeviceStates = computed(() => ({
   batteryCharging: props.deviceStates?.batteryCharging === true,
 }));
 
+const pendingDevices = reactive({
+  heatpump: false,
+  wallbox: false,
+  batteryCharging: false,
+});
+
+const pendingTargetState = reactive({
+  heatpump: null,
+  wallbox: null,
+  batteryCharging: null,
+});
+
+const hasPendingDevice = computed(
+  () => pendingDevices.heatpump || pendingDevices.wallbox || pendingDevices.batteryCharging
+);
+
+const displayedState = computed(() => (prediction.value ? prediction.value.state : normalizedDeviceStates.value));
+
+const resetPending = () => {
+  for (const key of Object.keys(pendingDevices)) {
+    pendingDevices[key] = false;
+    pendingTargetState[key] = null;
+  }
+};
+
 const markPendingChanges = state => {
   const current = normalizedDeviceStates.value;
 
-  if (state.heatpump !== current.heatpump) {
-    pendingDevices.heatpump = true;
-    pendingFromState.heatpump = current.heatpump;
-  }
-
-  if (state.wallbox !== current.wallbox) {
-    pendingDevices.wallbox = true;
-    pendingFromState.wallbox = current.wallbox;
-  }
-
-  if (state.batteryCharging !== current.batteryCharging) {
-    pendingDevices.batteryCharging = true;
-    pendingFromState.batteryCharging = current.batteryCharging;
+  for (const key of Object.keys(pendingDevices)) {
+    if (state?.[key] !== current[key]) {
+      pendingDevices[key] = true;
+      pendingTargetState[key] = state[key];
+    }
   }
 };
 
-const clearPending = device => {
-  pendingDevices[device] = false;
-  pendingFromState[device] = null;
-};
+watch(
+  normalizedDeviceStates,
+  current => {
+    for (const key of Object.keys(pendingDevices)) {
+      if (pendingDevices[key] && current[key] === pendingTargetState[key]) {
+        pendingDevices[key] = false;
+        pendingTargetState[key] = null;
+      }
+    }
+  },
+  { deep: true }
+);
 
 /*
- * Clear gray/pending state when a new reported value arrives.
- * We deliberately do not switch the UI at command time.
+ * ============================================================
+ * STATUS
+ * ============================================================
  */
-watch(
-  () => normalizedDeviceStates.value.heatpump,
-  value => {
-    if (pendingDevices.heatpump && value !== pendingFromState.heatpump) {
-      clearPending('heatpump');
-    }
-  }
-);
-
-watch(
-  () => normalizedDeviceStates.value.wallbox,
-  value => {
-    if (pendingDevices.wallbox && value !== pendingFromState.wallbox) {
-      clearPending('wallbox');
-    }
-  }
-);
-
-watch(
-  () => normalizedDeviceStates.value.batteryCharging,
-  value => {
-    if (pendingDevices.batteryCharging && value !== pendingFromState.batteryCharging) {
-      clearPending('batteryCharging');
-    }
-  }
-);
 
 const conditionForVuf = value => {
   const numeric = Number(value);
@@ -355,11 +414,17 @@ const agentStateDescription = computed(() => {
   }
 
   if (agentState.value === 'adjusting') {
-    return 'A device adjustment was requested. Waiting for the physical system to settle.';
+    return 'A device adjustment was selected. Waiting for the physical system to settle.';
   }
 
   return 'Automatic control is monitoring VUF.';
 });
+
+/*
+ * ============================================================
+ * COOLDOWN
+ * ============================================================
+ */
 
 const cooldownRemaining = computed(() => {
   if (agentState.value !== 'adjusting') {
@@ -372,6 +437,12 @@ const cooldownRemaining = computed(() => {
 const cooldownProgress = computed(() =>
   Math.max(0, Math.min(100, ((cooldownRemaining.value * 1000) / SETTLE_TIME_MS) * 100))
 );
+
+/*
+ * ============================================================
+ * LOGGING
+ * ============================================================
+ */
 
 const formatVuf = value => {
   const numeric = Number(value);
@@ -406,39 +477,10 @@ const addLog = (title, message = '', type = 'info') => {
 };
 
 /*
- * Manual controls remain clickable even while a command is pending.
+ * ============================================================
+ * PREDICTION
+ * ============================================================
  */
-const setDeviceState = (device, value) => {
-  const state = {
-    ...normalizedDeviceStates.value,
-  };
-
-  if (device === 'heatpump') {
-    state.heatpump = clampInt(value, 0, MAX_HEATPUMP);
-  }
-
-  if (device === 'wallbox') {
-    state.wallbox = clampInt(value, 0, MAX_WALLBOX);
-  }
-
-  if (device === 'batteryCharging') {
-    state.batteryCharging = value === true;
-  }
-
-  markPendingChanges(state);
-
-  emit('apply-state', state);
-
-  addLog(
-    'Manual device state requested',
-    [
-      `Heat pump ${state.heatpump}/5`,
-      `Wallbox ${state.wallbox}/3`,
-      `Battery ${state.batteryCharging ? 'ON' : 'OFF'}`,
-    ].join(' · '),
-    'info'
-  );
-};
 
 const predictCandidate = async state => {
   try {
@@ -459,34 +501,87 @@ const predictCandidate = async state => {
   }
 };
 
+/*
+ * ============================================================
+ * STEP 1
+ *
+ * REDUCE EXISTING LOAD
+ * ============================================================
+ *
+ * Only ONE device changes by ONE level.
+ *
+ * We only create reduction candidates that remain at or above
+ * 50% of the device's maximum.
+ *
+ * Example:
+ *
+ * wallbox = 3
+ *
+ * candidate:
+ * wallbox = 2
+ *
+ * 2 / 3 = 66.7%
+ *
+ * therefore allowed.
+ *
+ *
+ * wallbox = 2
+ *
+ * candidate:
+ * wallbox = 1
+ *
+ * 1 / 3 = 33.3%
+ *
+ * therefore NOT included here.
+ */
+
 const getReductionCandidates = current => {
   const candidates = [];
 
+  /*
+   * Heat pump: one level down.
+   */
   if (current.heatpump > 0) {
     const nextLevel = current.heatpump - 1;
 
-    if (nextLevel / MAX_HEATPUMP >= MIN_LOAD_RATIO) {
+    const ratio = nextLevel / MAX_HEATPUMP;
+
+    if (ratio >= MIN_LOAD_RATIO) {
       candidates.push({
         ...current,
+
         heatpump: nextLevel,
       });
     }
   }
 
+  /*
+   * Wallbox: one level down.
+   */
   if (current.wallbox > 0) {
     const nextLevel = current.wallbox - 1;
 
-    if (nextLevel / MAX_WALLBOX >= MIN_LOAD_RATIO) {
+    const ratio = nextLevel / MAX_WALLBOX;
+
+    if (ratio >= MIN_LOAD_RATIO) {
       candidates.push({
         ...current,
+
         wallbox: nextLevel,
       });
     }
   }
 
+  /*
+   * Battery is binary.
+   *
+   * If battery charging is already active, turning it off is
+   * considered a reduction.
+   */
   if (current.batteryCharging) {
     candidates.push({
       ...current,
+
       batteryCharging: false,
     });
   }
@@ -494,7 +589,19 @@ const getReductionCandidates = current => {
   return candidates;
 };
 
+/*
+ * ============================================================
+ * STEP 2
+ *
+ * DETECT WHETHER THE NEXT REDUCTION WOULD CROSS 50%
+ * ============================================================
+ */
+
 const hasBlockedReduction = current => {
+  /*
+   * Heat pump still has load, but its next step would go
+   * below 50%.
+   */
   if (current.heatpump > 0) {
     const nextLevel = current.heatpump - 1;
 
@@ -503,6 +610,9 @@ const hasBlockedReduction = current => {
     }
   }
 
+  /*
+   * Same test for wallbox.
+   */
   if (current.wallbox > 0) {
     const nextLevel = current.wallbox - 1;
 
@@ -514,12 +624,32 @@ const hasBlockedReduction = current => {
   return false;
 };
 
+/*
+ * ============================================================
+ * STEP 3
+ *
+ * COMPENSATE BY STARTING AN INACTIVE DEVICE
+ * ============================================================
+ *
+ * Only one previously inactive device is started.
+ *
+ * Heat pump:
+ * 0 -> 1
+ *
+ * Wallbox:
+ * 0 -> 1
+ *
+ * Battery:
+ * OFF -> ON
+ */
+
 const getCompensationCandidates = current => {
   const candidates = [];
 
   if (current.heatpump === 0) {
     candidates.push({
       ...current,
+
       heatpump: 1,
     });
   }
@@ -527,6 +657,7 @@ const getCompensationCandidates = current => {
   if (current.wallbox === 0) {
     candidates.push({
       ...current,
+
       wallbox: 1,
     });
   }
@@ -534,12 +665,25 @@ const getCompensationCandidates = current => {
   if (!current.batteryCharging) {
     candidates.push({
       ...current,
+
       batteryCharging: true,
     });
   }
 
   return candidates;
 };
+
+/*
+ * ============================================================
+ * SELECT BEST SINGLE-STEP CANDIDATE
+ * ============================================================
+ *
+ * We still use predicted VUF to decide WHICH one-step action
+ * is most useful.
+ *
+ * But unlike the old exhaustive optimiser, the candidate set
+ * itself is heavily restricted by the control policy.
+ */
 
 const evaluateCandidates = async candidates => {
   const results = [];
@@ -556,15 +700,48 @@ const evaluateCandidates = async candidates => {
     return null;
   }
 
+  /*
+   * The candidate set already represents equivalent policy
+   * actions (all are either one-step reductions or one-step
+   * compensations), so predicted VUF is a sensible tie-breaker
+   * here.
+   */
   results.sort((a, b) => a.vuf - b.vuf);
 
   return results[0];
 };
 
+/*
+ * ============================================================
+ * CONTROL POLICY
+ * ============================================================
+ *
+ * Priority:
+ *
+ * 1. Reduce an already-active load by ONE step.
+ *
+ * 2. Never perform that reduction if it would push the
+ *    proportional device below 50% of maximum.
+ *
+ * 3. Once that boundary is reached, try starting ONE currently
+ *    inactive device instead.
+ *
+ * 4. Wait five seconds after every physical action.
+ *
+ * 5. Then inspect estimated VUF again.
+ */
+
 const chooseNextAction = async () => {
   const current = {
     ...normalizedDeviceStates.value,
   };
+
+  /*
+   * --------------------------------------------------------
+   * FIRST PRIORITY:
+   * one-step reduction that remains >= 50%.
+   * --------------------------------------------------------
+   */
 
   const reductions = getReductionCandidates(current);
 
@@ -574,10 +751,22 @@ const chooseNextAction = async () => {
     if (bestReduction && bestReduction.vuf < Number(props.vuf) - MIN_IMPROVEMENT) {
       return {
         ...bestReduction,
+
         reason: 'reduce',
       };
     }
   }
+
+  /*
+   * --------------------------------------------------------
+   * SECOND PRIORITY:
+   *
+   * We have reached the point where another reduction would
+   * push an active proportional device below 50%.
+   *
+   * Instead, introduce another controllable load.
+   * --------------------------------------------------------
+   */
 
   if (hasBlockedReduction(current)) {
     const compensations = getCompensationCandidates(current);
@@ -587,13 +776,26 @@ const chooseNextAction = async () => {
     if (bestCompensation && bestCompensation.vuf < Number(props.vuf) - MIN_IMPROVEMENT) {
       return {
         ...bestCompensation,
+
         reason: 'compensate',
       };
     }
   }
 
+  /*
+   * No permitted action improved predicted VUF.
+   *
+   * Importantly, we DO NOT continue reducing below the 50%
+   * boundary automatically.
+   */
   return null;
 };
+
+/*
+ * ============================================================
+ * EXECUTE ONE CONTROL STEP
+ * ============================================================
+ */
 
 const selectAndApplyState = async repeatedViolation => {
   if (!autoEnabled.value || evaluating.value) {
@@ -606,7 +808,7 @@ const selectAndApplyState = async repeatedViolation => {
     addLog(
       repeatedViolation ? 'VUF still violated' : 'VUF violation detected',
 
-      `Measured VUF is ${formatVuf(props.vuf)}.`,
+      `Estimated VUF is ${formatVuf(props.vuf)}.`,
 
       'critical'
     );
@@ -619,11 +821,12 @@ const selectAndApplyState = async repeatedViolation => {
 
     if (!action) {
       prediction.value = null;
+
       agentState.value = 'monitoring';
 
       addLog(
         'No permitted adjustment found',
-        'No policy-approved one-step action is predicted to improve VUF.',
+        'No one-step reduction or compensation action is predicted to improve VUF.',
         'warning'
       );
 
@@ -632,29 +835,43 @@ const selectAndApplyState = async repeatedViolation => {
 
     prediction.value = action;
 
+    if (action.reason === 'reduce') {
+      addLog(
+        'Active load reduced',
+        [
+          `Heat pump ${action.state.heatpump}/5`,
+          `Wallbox ${action.state.wallbox}/3`,
+          `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`,
+          `Predicted VUF ${formatVuf(action.vuf)}`,
+        ].join(' · '),
+        'action'
+      );
+    } else {
+      addLog(
+        'Compensation device activated',
+        [
+          'Further reduction would cross the 50% load boundary.',
+          `Heat pump ${action.state.heatpump}/5`,
+          `Wallbox ${action.state.wallbox}/3`,
+          `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`,
+          `Predicted VUF ${formatVuf(action.vuf)}`,
+        ].join(' · '),
+        'action'
+      );
+    }
+
     /*
-     * Gray changed devices before emitting, but keep their displayed
-     * values at the last reported state.
+     * Send exactly ONE new state and keep a visual pending marker until feedback catches up.
      */
     markPendingChanges(action.state);
-
-    addLog(
-      action.reason === 'reduce' ? 'Active load reduction requested' : 'Compensation requested',
-
-      [
-        `Heat pump ${action.state.heatpump}/5`,
-        `Wallbox ${action.state.wallbox}/3`,
-        `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`,
-        `Predicted VUF ${formatVuf(action.vuf)}`,
-      ].join(' · '),
-
-      'action'
-    );
 
     emit('apply-state', {
       ...action.state,
     });
 
+    /*
+     * Now stop making decisions for five seconds.
+     */
     agentState.value = 'adjusting';
 
     cooldownUntil.value = Date.now() + SETTLE_TIME_MS;
@@ -662,6 +879,12 @@ const selectAndApplyState = async repeatedViolation => {
     evaluating.value = false;
   }
 };
+
+/*
+ * ============================================================
+ * MAIN STATE MACHINE
+ * ============================================================
+ */
 
 const evaluateAgent = async () => {
   now.value = Date.now();
@@ -676,25 +899,50 @@ const evaluateAgent = async () => {
     return;
   }
 
+  /*
+   * --------------------------------------------------------
+   * ADJUSTING
+   * --------------------------------------------------------
+   */
+
   if (agentState.value === 'adjusting') {
+    /*
+     * Physical devices get a full five seconds.
+     */
     if (now.value < cooldownUntil.value) {
       return;
     }
 
+    /*
+     * Five seconds have passed.
+     *
+     * Now use the latest estimated VUF.
+     */
     if (currentVuf > CRITICAL_VUF) {
       await selectAndApplyState(true);
+
       return;
     }
 
+    /*
+     * VUF is back at/below 2%.
+     */
     prediction.value = null;
+
     agentState.value = 'monitoring';
 
-    addLog('VUF stabilized', `Measured VUF is now ${formatVuf(currentVuf)}.`, 'success');
+    addLog('VUF stabilized', `Estimated VUF is now ${formatVuf(currentVuf)}.`, 'success');
 
     addLog('Monitoring resumed', 'Waiting for the next VUF violation.', 'monitoring');
 
     return;
   }
+
+  /*
+   * --------------------------------------------------------
+   * MONITORING
+   * --------------------------------------------------------
+   */
 
   agentState.value = 'monitoring';
 
@@ -703,12 +951,20 @@ const evaluateAgent = async () => {
   }
 };
 
+/*
+ * ============================================================
+ * AUTO ON / OFF
+ * ============================================================
+ */
+
 const toggleAuto = () => {
   autoEnabled.value = !autoEnabled.value;
 
   emit('enabled-change', autoEnabled.value);
 
   prediction.value = null;
+  resetPending();
+
   cooldownUntil.value = 0;
 
   if (autoEnabled.value) {
@@ -716,7 +972,11 @@ const toggleAuto = () => {
 
     addLog('Monitoring started', 'Automatic VUF control enabled.', 'monitoring');
 
+    /*
+     * Immediately inspect current VUF.
+     */
     evaluateAgent();
+
     return;
   }
 
@@ -725,14 +985,79 @@ const toggleAuto = () => {
   addLog('Agent inactive', 'Automatic VUF control disabled.', 'inactive');
 };
 
+/*
+ * ============================================================
+ * REACT TO VUF CHANGES
+ * ============================================================
+ */
+
 watch(
   () => props.vuf,
+
   () => {
+    /*
+     * During the five-second settling period we deliberately
+     * ignore incoming VUF changes.
+     */
     if (autoEnabled.value && agentState.value === 'monitoring') {
       evaluateAgent();
     }
   }
 );
+
+const setDeviceState = (device, value) => {
+  const state = {
+    ...normalizedDeviceStates.value,
+  };
+
+  if (device === 'heatpump') {
+    state.heatpump = clampInt(value, 0, MAX_HEATPUMP);
+  }
+
+  if (device === 'wallbox') {
+    state.wallbox = clampInt(value, 0, MAX_WALLBOX);
+  }
+
+  if (device === 'batteryCharging') {
+    state.batteryCharging = value === true;
+  }
+
+  markPendingChanges(state);
+  emit('apply-state', state);
+
+  addLog(
+    'Manual device state changed',
+    [
+      `Heat pump ${state.heatpump}/5`,
+      `Wallbox ${state.wallbox}/3`,
+      `Battery ${state.batteryCharging ? 'ON' : 'OFF'}`,
+    ].join(' · '),
+    'info'
+  );
+};
+
+const requestHeatpumpZeroHold = () => {
+  const state = {
+    ...normalizedDeviceStates.value,
+    heatpump: 0,
+  };
+
+  markPendingChanges(state);
+  prediction.value = { state, vuf: Number(props.vuf) };
+  emit('heatpump-zero-hold');
+
+  addLog(
+    'Heat pump ZERO_HOLD requested',
+    'Manual ZERO_HOLD uses Branch-A start,0 and is intentionally different from OFF/STOP.',
+    'info'
+  );
+};
+
+/*
+ * ============================================================
+ * LIFECYCLE
+ * ============================================================
+ */
 
 onMounted(() => {
   timer.value = window.setInterval(evaluateAgent, TICK_MS);
@@ -753,7 +1078,6 @@ onUnmounted(() => {
   --green: #42e38c;
   --yellow: #ffd166;
   --red: #ff5c6c;
-
   padding: 18px;
   color: var(--text);
   border: 1px solid #163448;
@@ -761,48 +1085,44 @@ onUnmounted(() => {
   background: linear-gradient(180deg, rgba(12, 30, 44, 0.96), rgba(6, 18, 28, 0.96));
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
 }
-
 .header,
 .section-head,
 .condition,
 .device-head,
-.cooldown-label {
+.cooldown-label,
+.prediction,
+.prediction-values {
   display: flex;
   align-items: center;
 }
-
 .header,
 .section-head,
 .device-head,
-.cooldown-label {
+.cooldown-label,
+.prediction {
   justify-content: space-between;
 }
-
 .header {
   align-items: flex-start;
   gap: 16px;
 }
-
 .eyebrow,
 .panel-label {
   color: #6f9ab1;
-  font-size: 18px;
+  font-size: 10px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
-
 h2,
 h3 {
   margin: 4px 0 0;
 }
-
 h2 {
   font-size: 18px;
 }
 h3 {
   font-size: 14px;
 }
-
 .control-toggle {
   display: flex;
   align-items: center;
@@ -814,18 +1134,15 @@ h3 {
   background: #081721;
   cursor: pointer;
 }
-
 .control-toggle.enabled {
   border-color: rgba(66, 227, 140, 0.55);
   color: #eafff4;
   background: rgba(21, 75, 59, 0.35);
 }
-
 .control-toggle strong,
 .control-toggle small {
   display: block;
 }
-
 .control-toggle strong {
   font-size: 11px;
 }
@@ -834,7 +1151,6 @@ h3 {
   color: #6f91a3;
   font-size: 9px;
 }
-
 .toggle-track {
   position: relative;
   width: 42px;
@@ -843,7 +1159,6 @@ h3 {
   border-radius: 999px;
   background: #0b1a25;
 }
-
 .toggle-knob {
   position: absolute;
   top: 3px;
@@ -856,27 +1171,22 @@ h3 {
     left 0.2s ease,
     background 0.2s ease;
 }
-
 .enabled .toggle-knob {
   left: 21px;
   background: var(--green);
 }
-
 .status-grid,
 .devices {
   display: grid;
   gap: 10px;
 }
-
 .status-grid {
   grid-template-columns: 1fr 1fr;
   margin-top: 16px;
 }
-
 .devices {
   grid-template-columns: repeat(3, 1fr);
 }
-
 .panel,
 .device {
   padding: 13px;
@@ -884,12 +1194,10 @@ h3 {
   border-radius: 14px;
   background: #081721;
 }
-
 .condition {
   gap: 8px;
   margin-top: 10px;
 }
-
 .dot,
 .log-dot {
   width: 8px;
@@ -897,7 +1205,6 @@ h3 {
   border-radius: 50%;
   background: #698a9c;
 }
-
 .balanced,
 .success {
   color: var(--green);
@@ -908,7 +1215,6 @@ h3 {
 .critical {
   color: var(--red);
 }
-
 .dot.balanced,
 .log-dot.success,
 .log-dot.monitoring {
@@ -933,33 +1239,21 @@ h3 {
 .log-dot.inactive {
   background: #698a9c;
 }
-
 .vuf-value {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
   margin-top: 10px;
   font-size: 30px;
   font-weight: 900;
 }
-
-.vuf-prediction {
-  color: var(--cyan);
-  font-size: 15px;
-  font-weight: 700;
-}
-
 .thresholds,
-.panel p {
+.panel p,
+.current-state {
   color: #6f91a3;
   font-size: 9px;
 }
-
 .panel p {
   margin: 8px 0 0;
   line-height: 1.45;
 }
-
 .cooldown {
   margin-top: 12px;
 }
@@ -980,11 +1274,9 @@ h3 {
   background: var(--cyan);
   transition: width 0.25s linear;
 }
-
 .section-head {
   margin: 17px 0 8px;
 }
-
 .badge {
   padding: 5px 8px;
   border: 1px solid #29566b;
@@ -992,135 +1284,114 @@ h3 {
   color: #8edff0;
   font-size: 8px;
 }
-
-.pending-badge {
-  color: #aeb8be;
-  border-color: #53636b;
-}
-
-.device {
-  position: relative;
-  transition:
-    opacity 0.2s ease,
-    filter 0.2s ease,
-    border-color 0.2s ease;
-}
-
-/* Gray while waiting for the next reported state, but stay clickable. */
-.device.pending {
-  opacity: 0.55;
-  filter: grayscale(0.9);
-  border-color: #58646a;
-}
-
-.device.pending::after {
-  content: 'WAITING FOR REPORT';
-  position: absolute;
-  right: 9px;
-  bottom: 7px;
-  color: #a6b0b5;
-  font-size: 7px;
-  letter-spacing: 0.08em;
-  pointer-events: none;
-}
-
 .device-head {
   color: #87a9ba;
-  font-size: 16px;
+  font-size: 10px;
 }
-
 .device-value {
   margin-top: 7px;
   font-size: 24px;
   font-weight: 800;
 }
-
 .device-value small {
   color: #789cad;
   font-size: 10px;
 }
-
 .segments {
-  display: flex;
-  gap: 2px;
-  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
   margin-top: 8px;
 }
-
-.segments .level-button {
-  flex: 1 1 0;
-  min-width: 0;
-  margin-top: 0;
-}
-
-/* Make the power button visually distinct */
-.segments .level-button:first-child {
-  margin-right: 5px;
-
-  border-radius: 999px;
-
-  font-size: 8px;
-  letter-spacing: 0.08em;
-}
-
-/* Device is running */
-.segments .level-button:first-child.power-on {
-  color: #8ff1c3;
-  border-color: #2b6f62;
-  background: rgba(66, 227, 140, 0.1);
-}
-
-/* Device is off */
-.segments .level-button:first-child.power-off {
-  color: #82949e;
-  border-color: #3b4d57;
-  background: #111d24;
-}
-
 .segments.three {
   grid-template-columns: repeat(3, 1fr);
 }
-
 .level-button {
+  height: 8px;
+
   padding: 0;
+
   border: 0;
-  border-radius: 4px;
+  border-radius: 999px;
+
   background: #183547;
+
   cursor: pointer;
+
   transition:
     background 0.15s ease,
     box-shadow 0.15s ease,
     transform 0.15s ease;
-  min-height: 1.5em;
 }
 
-.level-button:hover {
+.level-button:hover:not(:disabled) {
   background: #28566e;
+
+  transform: translateY(-1px);
 }
 
 .level-button.active {
   background: var(--cyan);
+
   box-shadow: 0 0 7px rgba(88, 231, 255, 0.25);
+}
+
+.level-button:disabled {
+  cursor: default;
+
+  opacity: 0.75;
 }
 
 .off-button {
   margin-top: 9px;
+
   padding: 4px 8px;
+
   color: #6f91a3;
+
   border: 1px solid #24495d;
   border-radius: 7px;
+
   background: transparent;
+
   font-size: 8px;
   font-weight: 700;
+
   cursor: pointer;
 }
 
 .off-button.active {
   color: #d7e8f1;
+
   border-color: #3b6479;
+
   background: #112837;
 }
 
+.off-button:disabled {
+  cursor: default;
+
+  opacity: 0.5;
+}
+
+.binary.clickable {
+  cursor: pointer;
+
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.binary.clickable:hover:not(:disabled) {
+  border-color: #3a6a80;
+}
+
+.binary.clickable:disabled {
+  cursor: default;
+
+  opacity: 0.75;
+}
 .binary {
   display: inline-block;
   margin-top: 10px;
@@ -1128,31 +1399,40 @@ h3 {
   border: 1px solid #24495d;
   border-radius: 999px;
   color: #769bad;
-  background: #0b1c29;
   font-size: 11px;
   font-weight: 800;
 }
-
 .binary.on {
   border-color: #2b6f62;
   color: #8ff1c3;
   background: rgba(66, 227, 140, 0.08);
 }
-
-.binary.clickable {
-  cursor: pointer;
+.current-state {
+  margin-top: 7px;
 }
-.binary.clickable:hover {
-  border-color: #3a6a80;
+.prediction {
+  gap: 16px;
+  margin-top: 12px;
+  padding: 13px;
+  border: 1px solid rgba(88, 231, 255, 0.27);
+  border-radius: 14px;
+  background: rgba(88, 231, 255, 0.04);
 }
-
+.prediction-title {
+  margin-top: 4px;
+  color: #93b5c5;
+  font-size: 10px;
+}
+.prediction-values {
+  gap: 10px;
+  font-size: 18px;
+}
 .log {
   height: 190px;
   overflow-y: auto;
   padding-right: 6px;
   scrollbar-width: thin;
 }
-
 .log-entry {
   display: grid;
   grid-template-columns: 65px 9px 1fr;
@@ -1161,7 +1441,6 @@ h3 {
   padding: 9px 0;
   border-bottom: 1px solid #123042;
 }
-
 .log-entry time {
   color: #5e8498;
   font-size: 9px;
@@ -1187,6 +1466,26 @@ h3 {
   text-align: center;
 }
 
+.device.pending {
+  border-color: #ffd166;
+  box-shadow: 0 0 0 1px rgba(255, 209, 102, 0.25), 0 0 20px rgba(255, 209, 102, 0.08);
+}
+.pending-badge,
+.pending-note {
+  color: #ffd166;
+}
+.pending-note {
+  display: block;
+  margin-top: -4px;
+  margin-bottom: 8px;
+  font-size: 10px;
+  letter-spacing: .03em;
+}
+.zero-hold-button {
+  margin-top: 6px;
+  border-color: #365b70;
+}
+
 @media (max-width: 760px) {
   .header {
     flex-direction: column;
@@ -1197,6 +1496,10 @@ h3 {
   .status-grid,
   .devices {
     grid-template-columns: 1fr;
+  }
+  .prediction {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

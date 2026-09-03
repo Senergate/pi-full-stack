@@ -2,7 +2,7 @@
   <section class="phasor-card">
     <div class="card-header">
       <div>
-        <div class="eyebrow">Voltage Phasor</div>
+        <div class="eyebrow">Voltage Phasor Estimate</div>
       </div>
 
       <span class="badge">225–240 V</span>
@@ -207,7 +207,7 @@ const INNER_RADIUS = 50
 const OUTER_RADIUS = 150
 
 const MIN_VOLTAGE = 225
-const MAX_VOLTAGE = 235
+const MAX_VOLTAGE = 240
 
 const phaseDefinitions = [
   {
@@ -228,7 +228,7 @@ const phaseDefinitions = [
 ]
 
 const voltageRings = computed(() => {
-  return [225, 230, 235].map(value => ({
+  return [225, 230, 235, 240].map(value => ({
     value,
     radius: voltageToRadius(value),
   }))

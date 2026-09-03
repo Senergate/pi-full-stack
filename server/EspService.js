@@ -3,11 +3,30 @@ const mqtt = () => EspService.server.services.get('MqttService').bus;
 const EspService = {
   name: 'EspService',
 
-  heatpump: async (load) => {
-    console.log('heatpump->', load);
+  heatpump: async (load, mode = 'auto') => {
     const bus = EspService.server.services.get('MqttService').bus;
-    bus.publish(`heatpump/vfd/control`, `start,${load*10}`);
-    return { x: 5 };
+    const numericLoad = Number(load);
+    const safeLoad = Number.isFinite(numericLoad) ? Math.max(0, numericLoad) : 0;
+    const hz = safeLoad * 10;
+
+    /*
+     * Senergate merge decision 3C:
+     * - OFF must be a real STOP command: stop,0.
+     * - ZERO_HOLD remains available explicitly: start,0.
+     * - Positive levels continue to use start,<hz>.
+     */
+    let payload;
+    if (mode === 'zero_hold') {
+      payload = 'start,0';
+    } else if (mode === 'stop' || hz <= 0) {
+      payload = 'stop,0';
+    } else {
+      payload = `start,${hz}`;
+    }
+
+    console.log('heatpump->', { load: safeLoad, mode, payload });
+    bus.publish(`heatpump/vfd/control`, payload);
+    return { accepted: true, payload };
   },
 
 

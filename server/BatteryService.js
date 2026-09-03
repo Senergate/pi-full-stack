@@ -2,7 +2,7 @@ const BatteryService = {
   name: 'BatteryService',
   set: (charging) => {
     const bus = BatteryService.server.services.get('MqttService').bus;
-    console.log('battery -> ', charging)
+    // Senergate merge decision 2A: Shelly relay ON means Battery CHARGING.
     bus.publish(`shelly-battery/command/switch:0`, charging ? 'on' : 'off');
   },
   requestUpdate: () => {

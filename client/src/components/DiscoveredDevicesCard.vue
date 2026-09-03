@@ -7,8 +7,8 @@ const props = defineProps({
 });
 
 const toggleBattery = () => {
-  let state = props.root.battery.discharging;
-  props.root.battery.discharging = null;
+  let state = props.root.battery.charging;
+  props.root.battery.charging = null;
   App.BatteryService.set(!state);
 };
 
@@ -81,7 +81,7 @@ const emit = defineEmits(['update:heatpumpLoad', 'update:count', 'toggle-wallbox
               /></q-item-section>
               <q-item-section side
                 ><q-toggle
-                  :model-value="props.root.battery.discharging"
+                  :model-value="props.root.battery.charging"
                   indeterminate-value="null"
                   color="secondary"
                   @update:model-value="toggleBattery"
