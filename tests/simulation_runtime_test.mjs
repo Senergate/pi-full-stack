@@ -35,9 +35,9 @@ snap = SimulationRuntime.getSnapshot();
 assert(wallboxStates.get(0) === true, 'Wallbox R0 must update locally.');
 assert(snap.projectedCurrentsA.b === 51, 'Wallbox R0 must add 16 A to virtual L2.');
 
-SimulationRuntime.EspService.heatpump(0.4); // level 2 of 5 => +14 A
+SimulationRuntime.EspService.heatpump({ mode: 'start', level: 2, target_hz: 20 }); // level 2 of 5 => +14 A
 snap = SimulationRuntime.getSnapshot();
-assert(snap.heatpumpLevel === 2, 'Heatpump 0.4 must map to level 2.');
+assert(snap.heatpumpLevel === 2, 'Heatpump level 2 must map to level 2.');
 assert(snap.projectedCurrentsA.a === 49, 'Heatpump level 2 must add 14 A to virtual L1.');
 
 

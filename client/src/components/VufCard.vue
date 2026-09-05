@@ -20,6 +20,12 @@
 
     <div class="reference">Engineering reference: EN 50160 VUF ≤ 2% · demo status only</div>
 
+    <div class="vuf-breakdown">
+      <span>Total estimated: {{ formatPercent(safeVuf) }}</span>
+      <span>Baseline grid: {{ formattedBaseline }}</span>
+      <span>Controllable impact: {{ formattedControllable }}</span>
+    </div>
+
     <div class="history">
       <div class="history-header">
         <span>VUF · last 10 seconds</span>
@@ -38,6 +44,16 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 
 const props = defineProps({
   vuf: {
+    type: Number,
+    required: false,
+    default: null,
+  },
+  baselineVuf: {
+    type: Number,
+    required: false,
+    default: null,
+  },
+  controllableVuf: {
     type: Number,
     required: false,
     default: null,
@@ -72,9 +88,18 @@ const safeVuf = computed(() => {
   return Number.isFinite(value) ? Math.max(0, value) : null;
 });
 
+const formatPercent = value => {
+  if (value === null || value === undefined || value === '') return '--';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${numeric.toFixed(2)}%` : '--';
+};
+
 const formattedVuf = computed(() =>
   safeVuf.value === null ? '--' : `${safeVuf.value.toFixed(1)}%`
 );
+
+const formattedBaseline = computed(() => formatPercent(props.baselineVuf));
+const formattedControllable = computed(() => formatPercent(props.controllableVuf));
 
 const statusLabel = computed(() => {
   if (safeVuf.value === null) return 'NO DATA';
@@ -526,4 +551,20 @@ onUnmounted(() => {
   width: 100%;
   height: 150px;
 }
+.vuf-breakdown {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+  color: #83a7bd;
+  font-size: 10px;
+}
+
+.vuf-breakdown span {
+  padding: 6px 8px;
+  border: 1px solid rgba(88, 231, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(3, 15, 24, 0.4);
+}
+
 </style>

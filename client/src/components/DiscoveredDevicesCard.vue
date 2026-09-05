@@ -7,8 +7,8 @@ const props = defineProps({
 });
 
 const toggleBattery = () => {
-  let state = props.root.battery.discharging;
-  props.root.battery.discharging = null;
+  let state = props.root.battery.charging;
+  props.root.battery.charging = null;
   App.BatteryService.set(!state);
 };
 
@@ -26,7 +26,7 @@ const emit = defineEmits(['update:heatpumpLoad', 'update:count', 'toggle-wallbox
               ><q-item-section side><q-icon color="secondary" name="heat_pump" size="3em" /></q-item-section
               ><q-item-section
                 ><q-slider
-                  :model-value="props.root.heatpump.load"
+                  :model-value="props.root.heatpump.level"
                   :min="0"
                   :max="5"
                   label
@@ -81,7 +81,7 @@ const emit = defineEmits(['update:heatpumpLoad', 'update:count', 'toggle-wallbox
               /></q-item-section>
               <q-item-section side
                 ><q-toggle
-                  :model-value="props.root.battery.discharging"
+                  :model-value="props.root.battery.charging"
                   indeterminate-value="null"
                   color="secondary"
                   @update:model-value="toggleBattery"

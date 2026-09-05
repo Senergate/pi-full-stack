@@ -11,6 +11,7 @@ const CURRENT_PROJECTION_FACTOR = { a: 800, b: 400, c: 230 };
 
 const HEATPUMP_MAX_CURRENT_A = 35;
 const HEATPUMP_LEVELS = 5;
+const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 const WALLBOX_R0_CURRENT_A = 16;
 const WALLBOX_R1_CURRENT_A = 16;
 const BATTERY_CHARGE_CURRENT_A = 20;
@@ -35,6 +36,7 @@ const createEmitter = () => {
 const energyEmitter = createEmitter();
 const wallboxEmitter = createEmitter();
 const batteryEmitter = createEmitter();
+const branchAEmitter = createEmitter();
 
 /*
  * Scenario values are BUILDING-SCALE projected base currents.
@@ -95,6 +97,54 @@ const projectedCurrents = () => ({
     (state.batteryCharging ? BATTERY_CHARGE_CURRENT_A : 0),
 });
 
+const finiteNumber = value => {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const levelToHz = level => HEATPUMP_LEVEL_TO_HZ[clampInt(level, 0, HEATPUMP_LEVELS)] ?? 0;
+
+const hzToLevel = hz => {
+  const parsed = finiteNumber(hz);
+  if (parsed === null || parsed <= 2) return 0;
+  return clampInt(Math.round(parsed / 10), 1, HEATPUMP_LEVELS);
+};
+
+const normalizeHeatpumpCommand = command => {
+  if (command === null || command === undefined || typeof command !== 'object' || Array.isArray(command)) {
+    return { accepted: false, reason: 'legacy_normalized_load_rejected', simulation: true };
+  }
+
+  const mode = String(command.mode ?? '').toLowerCase();
+  const level = clampInt(command.level, 0, HEATPUMP_LEVELS);
+  const targetHz = finiteNumber(command.target_hz ?? command.targetHz) ?? levelToHz(level);
+
+  if (mode === 'stop') return { accepted: true, mode, level: 0, target_hz: 0, simulation: true };
+  if (mode === 'zero_hold') return { accepted: true, mode, level: 0, target_hz: 0, simulation: true };
+
+  if (mode === 'start') {
+    if (level < 1 || level > HEATPUMP_LEVELS) return { accepted: false, reason: 'invalid_heatpump_level', simulation: true };
+    if (!Number.isFinite(targetHz) || targetHz <= 2 || targetHz > 50) return { accepted: false, reason: 'invalid_target_hz', simulation: true };
+    return { accepted: true, mode, level, target_hz: targetHz, simulation: true };
+  }
+
+  return { accepted: false, reason: 'invalid_heatpump_mode', simulation: true };
+};
+
+const heatpumpStatusPayload = () => {
+  const targetHz = levelToHz(state.heatpumpLevel);
+  return {
+    simulation: true,
+    state: state.heatpumpLevel > 0 ? 'RUNNING' : 'STOP',
+    heatpump_level: state.heatpumpLevel,
+    target_frequency_hz: targetHz,
+    actual_output_frequency_hz: targetHz,
+  };
+};
+
+const emitHeatpumpStatus = () => branchAEmitter.emit('branchA', heatpumpStatusPayload());
+
 const rawEnergyPayload = () => {
   const projected = projectedCurrents();
   const measured = {
@@ -134,6 +184,7 @@ const emitDeviceState = () => {
   wallboxEmitter.emit('data', { id: 0, output: state.wallbox.r0, simulation: true });
   wallboxEmitter.emit('data', { id: 1, output: state.wallbox.r1, simulation: true });
   batteryEmitter.emit('data', { output: state.batteryCharging, simulation: true });
+  emitHeatpumpStatus();
 };
 
 const emitAll = () => {
@@ -199,25 +250,30 @@ const SimulationRuntime = {
   },
 
   EspService: {
-    heatpump(load, mode = 'auto') {
-      const normalized = Math.max(0, Math.min(1, Number(load) || 0));
+    on: branchAEmitter.on,
+    off: branchAEmitter.off,
 
-      // Keep the Branch-A command semantics visible in simulation too:
-      // OFF/STOP and ZERO_HOLD both lead to level 0 in the local plant model,
-      // but they remain different command intents for the real ESP32 path.
-      if (mode === 'stop' || mode === 'zero_hold') {
-        state.heatpumpLevel = 0;
+    heatpump(command) {
+      const normalized = normalizeHeatpumpCommand(command);
+      if (!normalized.accepted) return normalized;
+
+      if (normalized.mode === 'start') {
+        state.heatpumpLevel = normalized.level ?? hzToLevel(normalized.target_hz);
       } else {
-        state.heatpumpLevel = clampInt(normalized * HEATPUMP_LEVELS, 0, HEATPUMP_LEVELS);
+        state.heatpumpLevel = 0;
       }
 
+      emitHeatpumpStatus();
       scheduleClosedLoopUpdate();
       return {
-        accepted: true,
+        ...normalized,
         heatpumpLevel: state.heatpumpLevel,
-        mode,
-        simulation: true,
       };
+    },
+
+    requestUpdate() {
+      emitAll();
+      return { accepted: true, simulation: true };
     },
   },
 

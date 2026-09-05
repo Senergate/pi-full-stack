@@ -70,7 +70,7 @@ const weak = PhasorCalculator.analyzeVUF({
 assert(stiff.vufPercent < typical.vufPercent, 'Stiff grid should produce lower Estimated VUF than typical grid.');
 assert(weak.vufPercent > typical.vufPercent, 'Weak grid should produce higher Estimated VUF than typical grid.');
 
-SimulationRuntime.EspService.heatpump(0.8); // 5 -> 4
+SimulationRuntime.EspService.heatpump({ mode: 'start', level: 4, target_hz: 40 }); // 5 -> 4
 const reduced = SimulationRuntime.getSnapshot().projectedCurrentsA;
 const reducedVuf = PhasorCalculator.analyzeVUF({
   currents: reduced,
@@ -80,7 +80,7 @@ const reducedVuf = PhasorCalculator.analyzeVUF({
 });
 assert(reducedVuf.vufPercent < typical.vufPercent, 'Heatpump one-step reduction should improve VUF in AI test scenario.');
 
-SimulationRuntime.EspService.heatpump(0.6); // 4 -> 3
+SimulationRuntime.EspService.heatpump({ mode: 'start', level: 3, target_hz: 30 }); // 4 -> 3
 const reduced2 = SimulationRuntime.getSnapshot().projectedCurrentsA;
 const reduced2Vuf = PhasorCalculator.analyzeVUF({
   currents: reduced2,

@@ -65,17 +65,18 @@
 
     <div class="devices">
       <!-- Heat pump -->
-      <div class="device" :class="{ pending: pendingDevices.heatpump }">
+      <div class="device" :class="{ pending: pendingDevices.heatpump, unknown: displayedState.heatpump === null }">
         <div class="device-head">
           <span>Heat pump</span>
           <span>L1</span>
         </div>
 
         <div class="device-value">
-          {{ displayedState.heatpump }}
+          {{ formatDeviceLevel(displayedState.heatpump) }}
           <small>/ 5</small>
         </div>
         <small v-if="pendingDevices.heatpump" class="pending-note">pending → {{ pendingTargetState.heatpump }}/5</small>
+        <small v-else-if="displayedState.heatpump === null" class="pending-note">waiting for Branch-A status</small>
 
         <div class="segments">
           <button
@@ -84,7 +85,7 @@
             type="button"
             class="level-button"
             :class="{
-              active: level <= displayedState.heatpump,
+              active: displayedState.heatpump !== null && level <= displayedState.heatpump,
             }"
             :disabled="autoEnabled"
             :title="`Set heat pump to level ${level}`"
@@ -114,17 +115,18 @@
       </div>
 
       <!-- Wallbox -->
-      <div class="device" :class="{ pending: pendingDevices.wallbox }">
+      <div class="device" :class="{ pending: pendingDevices.wallbox, unknown: displayedState.wallbox === null }">
         <div class="device-head">
           <span>Wallbox</span>
           <span>L2</span>
         </div>
 
         <div class="device-value">
-          {{ displayedState.wallbox }}
+          {{ formatDeviceLevel(displayedState.wallbox) }}
           <small>/ 3</small>
         </div>
         <small v-if="pendingDevices.wallbox" class="pending-note">pending → {{ pendingTargetState.wallbox }}/3</small>
+        <small v-else-if="displayedState.wallbox === null" class="pending-note">waiting for Branch-B/Shelly status</small>
 
         <div class="segments three">
           <button
@@ -133,7 +135,7 @@
             type="button"
             class="level-button"
             :class="{
-              active: level <= displayedState.wallbox,
+              active: displayedState.wallbox !== null && level <= displayedState.wallbox,
             }"
             :disabled="autoEnabled"
             :title="`Set wallbox to level ${level}`"
@@ -153,21 +155,23 @@
       </div>
 
       <!-- Battery -->
-      <div class="device" :class="{ pending: pendingDevices.batteryCharging }">
+      <div class="device" :class="{ pending: pendingDevices.batteryCharging, unknown: displayedState.batteryCharging === null }">
         <div class="device-head">
           <span>Battery charging</span>
           <span>L3</span>
         </div>
+
         <small v-if="pendingDevices.batteryCharging" class="pending-note">pending → {{ pendingTargetState.batteryCharging ? 'ON' : 'OFF' }}</small>
+        <small v-else-if="displayedState.batteryCharging === null" class="pending-note">waiting for battery status</small>
 
         <button
           type="button"
           class="binary clickable"
-          :class="{ on: displayedState.batteryCharging }"
+          :class="{ on: displayedState.batteryCharging === true }"
           :disabled="autoEnabled"
-          @click="setDeviceState('batteryCharging', !normalizedDeviceStates.batteryCharging)"
+          @click="setDeviceState('batteryCharging', nextBatteryCommand)"
         >
-          {{ displayedState.batteryCharging ? 'ON' : 'OFF' }}
+          {{ formatBinary(displayedState.batteryCharging) }}
         </button>
       </div>
     </div>
@@ -196,7 +200,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch, onMounted, onBeforeUnmount } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 
 /*
  * ============================================================
@@ -268,6 +272,30 @@ const props = defineProps({
     type: Function,
     required: true,
   },
+
+  controlReady: {
+    type: Boolean,
+    required: false,
+    default: true,
+  },
+
+  controlBlockedReason: {
+    type: String,
+    required: false,
+    default: '',
+  },
+
+  baselineVuf: {
+    type: Number,
+    required: false,
+    default: null,
+  },
+
+  controlVuf: {
+    type: Number,
+    required: false,
+    default: null,
+  },
 });
 
 const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold']);
@@ -314,12 +342,22 @@ const clampInt = (value, min, max) => {
   return Math.max(min, Math.min(max, Math.round(numeric)));
 };
 
+const nullableClampInt = (value, min, max) => {
+  if (value === null || value === undefined || value === '') return null;
+  return clampInt(value, min, max);
+};
+
+const nullableBool = value => {
+  if (value === null || value === undefined || value === '') return null;
+  return value === true;
+};
+
 const normalizedDeviceStates = computed(() => ({
-  heatpump: clampInt(props.deviceStates?.heatpump, 0, MAX_HEATPUMP),
+  heatpump: nullableClampInt(props.deviceStates?.heatpump, 0, MAX_HEATPUMP),
 
-  wallbox: clampInt(props.deviceStates?.wallbox, 0, MAX_WALLBOX),
+  wallbox: nullableClampInt(props.deviceStates?.wallbox, 0, MAX_WALLBOX),
 
-  batteryCharging: props.deviceStates?.batteryCharging === true,
+  batteryCharging: nullableBool(props.deviceStates?.batteryCharging),
 }));
 
 const pendingDevices = reactive({
@@ -338,7 +376,16 @@ const hasPendingDevice = computed(
   () => pendingDevices.heatpump || pendingDevices.wallbox || pendingDevices.batteryCharging
 );
 
+const hasUnknownDeviceState = computed(() =>
+  Object.values(normalizedDeviceStates.value).some(value => value === null)
+);
+
 const displayedState = computed(() => (prediction.value ? prediction.value.state : normalizedDeviceStates.value));
+
+const nextBatteryCommand = computed(() => normalizedDeviceStates.value.batteryCharging !== true);
+
+const formatDeviceLevel = value => value === null ? '--' : String(value);
+const formatBinary = value => value === null ? '--' : (value ? 'ON' : 'OFF');
 
 const resetPending = () => {
   for (const key of Object.keys(pendingDevices)) {
@@ -351,7 +398,7 @@ const markPendingChanges = state => {
   const current = normalizedDeviceStates.value;
 
   for (const key of Object.keys(pendingDevices)) {
-    if (state?.[key] !== current[key]) {
+    if (state?.[key] !== null && state?.[key] !== undefined && state[key] !== current[key]) {
       pendingDevices[key] = true;
       pendingTargetState[key] = state[key];
     }
@@ -422,7 +469,11 @@ const agentStateDescription = computed(() => {
     return 'A device adjustment was selected. Waiting for the physical system to settle.';
   }
 
-  return 'Automatic control is monitoring VUF.';
+  if (agentState.value === 'blocked') {
+    return props.controlBlockedReason || 'Automatic control is blocked by hardware/data gate.';
+  }
+
+  return 'Automatic control is monitoring controllable VUF impact.';
 });
 
 /*
@@ -739,6 +790,10 @@ const evaluateCandidates = async candidates => {
  */
 
 const chooseNextAction = async () => {
+  if (hasUnknownDeviceState.value) {
+    return null;
+  }
+
   const current = {
     ...normalizedDeviceStates.value,
   };
@@ -868,8 +923,7 @@ const selectAndApplyState = async repeatedViolation => {
     }
 
     /*
-     * Send exactly ONE new state and keep a visible pending marker until
-     * the reported device state catches up.
+     * Send exactly ONE new state and keep a pending marker until real feedback catches up.
      */
     markPendingChanges(action.state);
     emit('apply-state', {
@@ -900,6 +954,12 @@ const evaluateAgent = async () => {
     return;
   }
 
+  if (!props.controlReady) {
+    agentState.value = 'blocked';
+    prediction.value = null;
+    return;
+  }
+
   if (props.vuf === null || props.vuf === undefined || props.vuf === '') {
     agentState.value = 'monitoring';
     prediction.value = null;
@@ -908,6 +968,12 @@ const evaluateAgent = async () => {
 
   const currentVuf = Number(props.vuf);
   if (!Number.isFinite(currentVuf)) return;
+
+  if (hasUnknownDeviceState.value) {
+    agentState.value = 'monitoring';
+    prediction.value = null;
+    return;
+  }
 
   /*
    * --------------------------------------------------------
@@ -1478,6 +1544,10 @@ h3 {
 .device.pending {
   border-color: #ffd166;
   box-shadow: 0 0 0 1px rgba(255, 209, 102, 0.25), 0 0 20px rgba(255, 209, 102, 0.08);
+}
+.device.unknown {
+  border-style: dashed;
+  opacity: 0.88;
 }
 .pending-badge,
 .pending-note {

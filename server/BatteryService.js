@@ -1,8 +1,7 @@
 const BatteryService = {
   name: 'BatteryService',
-  // Senergate merge decision 2A:
-  // true = Battery CHARGING command, false = charger OFF.
-  // Do not use this boolean for discharge; use a future enum for charge/discharge/idle.
+  // Physical Branch-C command: true = charger ON, false = charger OFF.
+  // Discharge remains Digital-Twin-only in the current prototype.
   set: (charging) => {
     const bus = BatteryService.server.services.get('MqttService').bus;
     bus.publish(`shelly-battery/command/switch:0`, charging ? 'on' : 'off');
