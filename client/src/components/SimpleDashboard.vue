@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, watch } from 'vue';
 
 import App from '../App.js';
+import SimulationRuntime from '../SimulationRuntime.js';
 import PhasorCalculator from './PhasorCalculator.js';
 import DiscoveredDevicesCard from './DiscoveredDevicesCard.vue';
 import VufCard from './VufCard.vue';
@@ -9,16 +10,42 @@ import CurrentCard from './CurrentCard.vue';
 import PhasorCard from './PhasorCard.vue';
 import AgentCard from './AgentCard.vue';
 
-const scenarios = {
+const sourceScenarios = {
   ideal: {
     angle: { a: 0, b: -120, c: 120 },
-    resistance: { a: 0.05, b: 0.05, c: 0.05 },
-    reactance: { a: 0.02, b: 0.02, c: 0.02 },
   },
   realistic: {
     angle: { a: 0, b: -120.2, c: 119.8 },
-    resistance: { a: 0.08, b: 0.08, c: 0.08 },
-    reactance: { a: 0.03, b: 0.03, c: 0.03 },
+  },
+};
+
+/*
+ * Grid-Impedance presets are explicitly MODELED simulation parameters.
+ * They are not measured/calibrated values of the real Senergate site.
+ * Version 1 exposes Rphase/Xphase/Rneutral/Xneutral as recommended by the
+ * Senergate Grid-Impedance implementation guide.
+ */
+const GRID_IMPEDANCE_PRESETS = {
+  stiff: {
+    label: 'Stiff LV Grid',
+    rPhase: 0.03,
+    xPhase: 0.01,
+    rNeutral: 0.02,
+    xNeutral: 0.005,
+  },
+  typical: {
+    label: 'Typical Building Feeder',
+    rPhase: 0.08,
+    xPhase: 0.03,
+    rNeutral: 0.06,
+    xNeutral: 0.02,
+  },
+  weak: {
+    label: 'Weak Feeder',
+    rPhase: 0.12,
+    xPhase: 0.05,
+    rNeutral: 0.10,
+    xNeutral: 0.03,
   },
 };
 
@@ -28,26 +55,58 @@ const WALLBOX_R1_CURRENT = 16;
 const BATTERY_CHARGE_CURRENT = 20;
 const HEATPUMP_LEVELS = 5;
 
+// Shelly zero-current calibration remains part of the measured layer.
+const CURRENT_ZERO_OFFSET_A = { a: 0.24, b: 0.19, c: 0.13 };
+
+// Building-scale projection is a Digital-Twin assumption, never a measured value.
+const CURRENT_PROJECTION_FACTOR = { a: 800, b: 400, c: 230 };
+
 const _ = reactive({
   count: 0,
   heatpump: { load: 0 },
   wallbox: { load: -1, r0: null, r1: null },
-  // Merge decision 2A: relay ON means battery charging.
-  battery: { charging: false },
-  // Merge decision 5B: keep raw measurement and demo-scaled data separated.
-  energy_meter: { timedelta: null, lastUpdate: null, rawData: {}, demoScaled: {}, data: {} },
+  battery: { charging: null },
+  energy_meter: {
+    timedelta: null,
+    lastUpdate: null,
+    raw: {},
+    measured: {},
+    projected: {},
+  },
   vuf: {
     scenario: 'realistic',
     sourceAngle: { a: 0, b: -120, c: 120 },
-    resistance: { a: 0.05, b: 0.05, c: 0.05 },
-    reactance: { a: 0.02, b: 0.02, c: 0.02 },
+  },
+  grid: {
+    preset: 'typical',
+    rPhase: GRID_IMPEDANCE_PRESETS.typical.rPhase,
+    xPhase: GRID_IMPEDANCE_PRESETS.typical.xPhase,
+    rNeutral: GRID_IMPEDANCE_PRESETS.typical.rNeutral,
+    xNeutral: GRID_IMPEDANCE_PRESETS.typical.xNeutral,
+    provenance: 'modeled',
   },
   agent: { enabled: false },
 });
 
 let animationFrame = null;
 let unwatchHeatpump = null;
+let unwatchRuntimeMode = null;
+let boundRuntime = null;
 let pendingHeatpumpCommandMode = null;
+
+const isSimulation = computed(() => App._.mode === 'simulation');
+const currentSourceLabel = computed(() =>
+  isSimulation.value
+    ? 'DIGITAL TWIN SIMULATED · local sensor model'
+    : 'SCALED FROM MEASURED · Digital Twin'
+);
+
+const currentYRange = computed(() => ({
+  min: 0,
+  max: isSimulation.value ? 350 : 100,
+}));
+
+const getRuntime = () => isSimulation.value ? SimulationRuntime : App;
 
 const numberOrNull = value => {
   if (value === undefined || value === null || value === '') return null;
@@ -61,48 +120,117 @@ const clampInt = (value, min, max) => {
 };
 
 const selectScenario = key => {
-  const scenario = scenarios[key];
+  const scenario = sourceScenarios[key];
   if (!scenario) return;
   _.vuf.scenario = key;
   Object.assign(_.vuf.sourceAngle, scenario.angle);
-  Object.assign(_.vuf.resistance, scenario.resistance);
-  Object.assign(_.vuf.reactance, scenario.reactance);
 };
 
-const demoScaledEnergyData = computed(() => _.energy_meter.demoScaled ?? {});
+const finiteNonNegative = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+
+const setGridPreset = key => {
+  const preset = GRID_IMPEDANCE_PRESETS[key];
+  if (!preset) return;
+
+  _.grid.preset = key;
+  _.grid.rPhase = preset.rPhase;
+  _.grid.xPhase = preset.xPhase;
+  _.grid.rNeutral = preset.rNeutral;
+  _.grid.xNeutral = preset.xNeutral;
+  _.grid.provenance = 'modeled';
+};
+
+const phaseResistance = computed(() => {
+  const value = finiteNonNegative(_.grid.rPhase);
+  return { a: value, b: value, c: value };
+});
+
+const phaseReactance = computed(() => {
+  const value = finiteNonNegative(_.grid.xPhase);
+  return { a: value, b: value, c: value };
+});
+
+const phaseImpedanceMagnitude = computed(() =>
+  Math.hypot(finiteNonNegative(_.grid.rPhase), finiteNonNegative(_.grid.xPhase))
+);
+
+const neutralImpedanceMagnitude = computed(() =>
+  Math.hypot(finiteNonNegative(_.grid.rNeutral), finiteNonNegative(_.grid.xNeutral))
+);
+
+const gridPresetLabel = computed(() =>
+  GRID_IMPEDANCE_PRESETS[_.grid.preset]?.label ?? 'Custom MODELED Grid'
+);
+
+const markGridCustom = () => {
+  _.grid.preset = 'custom';
+  _.grid.provenance = 'modeled';
+};
 
 const measuredCurrents = computed(() => ({
-  a: numberOrNull(demoScaledEnergyData.value.a_current) ?? 0,
-  b: numberOrNull(demoScaledEnergyData.value.b_current) ?? 0,
-  c: numberOrNull(demoScaledEnergyData.value.c_current) ?? 0,
+  a: numberOrNull(_.energy_meter.measured.a_current),
+  b: numberOrNull(_.energy_meter.measured.b_current),
+  c: numberOrNull(_.energy_meter.measured.c_current),
+}));
+
+const projectedCurrents = computed(() => ({
+  a: numberOrNull(_.energy_meter.projected.a_current),
+  b: numberOrNull(_.energy_meter.projected.b_current),
+  c: numberOrNull(_.energy_meter.projected.c_current),
 }));
 
 const measuredPowerFactors = computed(() => ({
-  a: numberOrNull(demoScaledEnergyData.value.a_pf) ?? 1,
-  b: numberOrNull(demoScaledEnergyData.value.b_pf) ?? 1,
-  c: numberOrNull(demoScaledEnergyData.value.c_pf) ?? 1,
+  a: numberOrNull(_.energy_meter.measured.a_pf),
+  b: numberOrNull(_.energy_meter.measured.b_pf),
+  c: numberOrNull(_.energy_meter.measured.c_pf),
 }));
 
 const measuredVoltages = computed(() => ({
-  a: numberOrNull(demoScaledEnergyData.value.a_voltage) ?? 230,
-  b: numberOrNull(demoScaledEnergyData.value.b_voltage) ?? 230,
-  c: numberOrNull(demoScaledEnergyData.value.c_voltage) ?? 230,
+  a: numberOrNull(_.energy_meter.measured.a_voltage),
+  b: numberOrNull(_.energy_meter.measured.b_voltage),
+  c: numberOrNull(_.energy_meter.measured.c_voltage),
 }));
+
+const twinVoltages = computed(() => {
+  const measured = measuredVoltages.value;
+
+  if ([measured.a, measured.b, measured.c].some(value => value === null)) {
+    return { a: null, b: null, c: null };
+  }
+
+  if (_.vuf.scenario === 'realistic') {
+    return {
+      a: measured.a + 1.0,
+      b: measured.b - 1.0,
+      c: measured.c + 0.5,
+    };
+  }
+
+  return { ...measured };
+});
 
 const vufResult = computed(() =>
   PhasorCalculator.analyzeVUF({
-    currents: measuredCurrents.value,
+    currents: projectedCurrents.value,
     powerFactors: measuredPowerFactors.value,
-    sourceVoltages: measuredVoltages.value,
+    sourceVoltages: twinVoltages.value,
     sourceAngles: _.vuf.sourceAngle,
-    resistance: _.vuf.resistance,
-    reactance: _.vuf.reactance,
+    resistance: phaseResistance.value,
+    reactance: phaseReactance.value,
+    neutralResistance: finiteNonNegative(_.grid.rNeutral),
+    neutralReactance: finiteNonNegative(_.grid.xNeutral),
   })
 );
 
-const currentVuf = computed(() => {
-  const value = Number(vufResult.value?.vufPercent);
-  return Number.isFinite(value) ? value : 0;
+const currentVuf = computed(() => numberOrNull(vufResult.value?.vufPercent));
+
+const neutralVoltageDropMagnitude = computed(() => {
+  const value = vufResult.value?.neutralVoltageDrop;
+  if (!value || !Number.isFinite(value.re) || !Number.isFinite(value.im)) return null;
+  return Math.hypot(value.re, value.im);
 });
 
 const heatpumpLevel = computed(() =>
@@ -138,7 +266,11 @@ const heatpumpCurrentForLevel = level =>
 const batteryCurrentForState = charging => charging ? BATTERY_CHARGE_CURRENT : 0;
 
 const predictVufForDeviceState = candidate => {
-  const currents = { ...measuredCurrents.value };
+  const currents = { ...projectedCurrents.value };
+
+  if ([currents.a, currents.b, currents.c].some(value => value === null)) {
+    return null;
+  }
 
   currents.a +=
     heatpumpCurrentForLevel(candidate.heatpump) -
@@ -159,13 +291,15 @@ const predictVufForDeviceState = candidate => {
   const result = PhasorCalculator.analyzeVUF({
     currents,
     powerFactors: measuredPowerFactors.value,
-    sourceVoltages: measuredVoltages.value,
+    sourceVoltages: twinVoltages.value,
     sourceAngles: _.vuf.sourceAngle,
-    resistance: _.vuf.resistance,
-    reactance: _.vuf.reactance,
+    resistance: phaseResistance.value,
+    reactance: phaseReactance.value,
+    neutralResistance: finiteNonNegative(_.grid.rNeutral),
+    neutralReactance: finiteNonNegative(_.grid.xNeutral),
   });
 
-  return Number(result?.vufPercent);
+  return numberOrNull(result?.vufPercent);
 };
 
 const applyAgentDeviceState = state => {
@@ -174,23 +308,28 @@ const applyAgentDeviceState = state => {
   const targetBatteryCharging = state?.batteryCharging === true;
 
   const normalizedHeatpump = targetHeatpump / HEATPUMP_LEVELS;
-  applyHeatpumpLoad(normalizedHeatpump, targetHeatpump === 0 ? 'stop' : 'start');
+  const heatpumpCommandMode = targetHeatpump === 0 ? 'stop' : 'start';
+
+  if (Math.abs((Number(_.heatpump.load) || 0) - normalizedHeatpump) > 0.0001) {
+    pendingHeatpumpCommandMode = heatpumpCommandMode;
+    _.heatpump.load = normalizedHeatpump;
+  }
 
   const targetR0 = (targetWallbox & 1) !== 0;
   const targetR1 = (targetWallbox & 2) !== 0;
 
   if (_.wallbox.r0 !== null && _.wallbox.r0 !== targetR0) {
     _.wallbox.r0 = null;
-    App.WallboxService.set(0, targetR0);
+    getRuntime().WallboxService.set(0, targetR0);
   }
 
   if (_.wallbox.r1 !== null && _.wallbox.r1 !== targetR1) {
     _.wallbox.r1 = null;
-    App.WallboxService.set(1, targetR1);
+    getRuntime().WallboxService.set(1, targetR1);
   }
 
   if (batteryCharging.value !== targetBatteryCharging) {
-    App.BatteryService.set(targetBatteryCharging);
+    getRuntime().BatteryService.set(targetBatteryCharging);
   }
 };
 
@@ -198,45 +337,51 @@ const onAgentEnabledChange = enabled => {
   _.agent.enabled = enabled;
 };
 
-const buildDemoScaledEnergyData = input => {
-  const raw = { ...(input ?? {}) };
-  const scaled = { ...raw };
-
-  const scaleCurrent = (value, offset, factor) => {
-    const current = numberOrNull(value);
-    const corrected = Math.min(Math.max(0, (current ?? 0) - offset), 45);
-    return corrected * factor;
-  };
-
-  scaled.a_current = scaleCurrent(raw.a_current, 0.24, 800);
-  scaled.b_current = scaleCurrent(raw.b_current, 0.19, 400);
-  scaled.c_current = scaleCurrent(raw.c_current, 0.13, 230);
-
-  scaled.a_pf = 1;
-  scaled.b_pf = 1;
-  scaled.c_pf = 1;
-
-  scaled.a_voltage = numberOrNull(raw.a_voltage) ?? 230;
-  scaled.b_voltage = numberOrNull(raw.b_voltage) ?? 230;
-  scaled.c_voltage = numberOrNull(raw.c_voltage) ?? 230;
-
-  if (_.vuf.scenario === 'realistic') {
-    scaled.b_voltage += -1;
-    scaled.a_voltage += 1;
-    scaled.c_voltage += 0.5;
-  }
-
-  return scaled;
+const calibrateCurrent = (value, offset) => {
+  const n = numberOrNull(value);
+  return n === null ? null : Math.max(0, n - offset);
 };
 
-const onEnergyMeter = data => {
-  const raw = { ...(data ?? {}) };
-  const scaled = buildDemoScaledEnergyData(raw);
+const projectCurrent = (value, factor) => {
+  const n = numberOrNull(value);
+  return n === null ? null : n * factor;
+};
 
-  _.energy_meter.rawData = raw;
-  _.energy_meter.demoScaled = scaled;
-  // Backward-compatible alias for older widgets. Do not treat this as raw measured data.
-  _.energy_meter.data = scaled;
+const onEnergyMeter = payload => {
+  // Never mutate the Socket.IO/Shelly payload in place. Keep an auditable raw snapshot.
+  const raw = { ...payload };
+
+  // Calibrated measured layer: offsets are measurement calibration, not scenario scaling.
+  const measured = {
+    ...raw,
+    a_current: calibrateCurrent(raw.a_current, CURRENT_ZERO_OFFSET_A.a),
+    b_current: calibrateCurrent(raw.b_current, CURRENT_ZERO_OFFSET_A.b),
+    c_current: calibrateCurrent(raw.c_current, CURRENT_ZERO_OFFSET_A.c),
+    a_pf: numberOrNull(raw.a_pf),
+    b_pf: numberOrNull(raw.b_pf),
+    c_pf: numberOrNull(raw.c_pf),
+    a_voltage: numberOrNull(raw.a_voltage),
+    b_voltage: numberOrNull(raw.b_voltage),
+    c_voltage: numberOrNull(raw.c_voltage),
+  };
+
+  // Explicit Digital-Twin projection. These values are SCALED FROM MEASURED.
+  const simulatedInput = raw.simulation_mode === true || raw.source_type === 'simulated_sensor';
+
+  measured.source_type = simulatedInput ? 'simulated_sensor' : 'measured';
+
+  const projected = {
+    ...measured,
+    a_current: projectCurrent(measured.a_current, CURRENT_PROJECTION_FACTOR.a),
+    b_current: projectCurrent(measured.b_current, CURRENT_PROJECTION_FACTOR.b),
+    c_current: projectCurrent(measured.c_current, CURRENT_PROJECTION_FACTOR.c),
+    source_type: simulatedInput ? 'digital_twin_simulated' : 'scaled_from_measured',
+    projection_factor: { ...CURRENT_PROJECTION_FACTOR },
+  };
+
+  Object.assign(_.energy_meter.raw, raw);
+  Object.assign(_.energy_meter.measured, measured);
+  Object.assign(_.energy_meter.projected, projected);
   _.energy_meter.lastUpdate = performance.now();
 };
 
@@ -250,6 +395,7 @@ const onWallbox = data => {
 };
 
 const onBattery = data => {
+  // Branch C physical path is charging only: Shelly output ON means charger enabled.
   _.battery.charging = data.output === true;
 };
 
@@ -258,35 +404,31 @@ const toggleWallbox = r => {
     if (_.wallbox.r0 === null) return;
     const state = !_.wallbox.r0;
     _.wallbox.r0 = null;
-    App.WallboxService.set(0, state);
+    getRuntime().WallboxService.set(0, state);
     return;
   }
 
   if (_.wallbox.r1 === null) return;
   const state = !_.wallbox.r1;
   _.wallbox.r1 = null;
-  App.WallboxService.set(1, state);
-};
-
-const applyHeatpumpLoad = (normalizedLoad, mode = null) => {
-  const safeLoad = Math.max(0, Math.min(1, Number(normalizedLoad) || 0));
-  const commandMode = mode ?? (safeLoad <= 0 ? 'stop' : 'start');
-
-  if (Math.abs((Number(_.heatpump.load) || 0) - safeLoad) <= 0.0001) {
-    App.EspService.heatpump(safeLoad, commandMode);
-    return;
-  }
-
-  pendingHeatpumpCommandMode = commandMode;
-  _.heatpump.load = safeLoad;
+  getRuntime().WallboxService.set(1, state);
 };
 
 const updateHeatpumpLoad = value => {
-  applyHeatpumpLoad(Number(value) || 0);
+  const normalized = Math.max(0, Math.min(1, Number(value) || 0));
+  pendingHeatpumpCommandMode = normalized <= 0 ? 'stop' : 'start';
+  _.heatpump.load = normalized;
 };
 
-const sendHeatpumpZeroHold = () => {
-  applyHeatpumpLoad(0, 'zero_hold');
+const requestHeatpumpZeroHold = () => {
+  pendingHeatpumpCommandMode = 'zero_hold';
+
+  if (Math.abs((Number(_.heatpump.load) || 0)) > 0.0001) {
+    _.heatpump.load = 0;
+    return;
+  }
+
+  getRuntime().EspService.heatpump(0, 'zero_hold');
 };
 
 const updateCount = value => {
@@ -301,24 +443,101 @@ const animate = () => {
   animationFrame = requestAnimationFrame(animate);
 };
 
-const init = () => {
-  selectScenario('realistic');
+const unbindRuntime = () => {
+  unwatchHeatpump?.();
+  unwatchHeatpump = null;
+
+  if (!boundRuntime) return;
+
+  boundRuntime.EnergyMeterService?.off?.('data', onEnergyMeter);
+  boundRuntime.WallboxService?.off?.('data', onWallbox);
+  boundRuntime.BatteryService?.off?.('data', onBattery);
+
+  if (boundRuntime === SimulationRuntime) {
+    SimulationRuntime.stop();
+  }
+
+  boundRuntime = null;
+};
+
+const bindRuntime = () => {
+  unbindRuntime();
+
+  const runtime = getRuntime();
+  if (!runtime?.EnergyMeterService || !runtime?.WallboxService || !runtime?.BatteryService || !runtime?.EspService) {
+    return;
+  }
+
+  boundRuntime = runtime;
+
+  runtime.EnergyMeterService.on('data', onEnergyMeter);
+  runtime.WallboxService.on('data', onWallbox);
+  runtime.BatteryService.on('data', onBattery);
+
+  if (runtime === SimulationRuntime) {
+    SimulationRuntime.start();
+  }
+
+  runtime.EnergyMeterService.requestUpdate?.();
+  runtime.WallboxService.requestUpdate?.();
+  runtime.BatteryService.requestUpdate?.();
 
   unwatchHeatpump = watch(
     () => _.heatpump.load,
     value => {
+      // In SIMULATION this call terminates inside SimulationRuntime.
+      // In REAL mode it delegates to the existing Pi5 Socket.IO service.
       const mode = pendingHeatpumpCommandMode ?? (Number(value) <= 0 ? 'stop' : 'start');
       pendingHeatpumpCommandMode = null;
-      App.EspService.heatpump(value, mode);
+      runtime.EspService.heatpump(value, mode);
     }
   );
+};
 
-  App.EnergyMeterService.on('data', onEnergyMeter);
-  App.WallboxService.on('data', onWallbox);
-  App.BatteryService.on('data', onBattery);
+const setRuntimeMode = mode => {
+  App.setMode(mode);
+};
 
-  App.WallboxService.requestUpdate();
-  App.BatteryService.requestUpdate();
+const setSimulationScenario = name => {
+  if (!SimulationRuntime.setScenario(name)) return;
+
+  // Heatpump has no separate status emitter in the current UI contract.
+  // Synchronize the visible/controller state with the scenario snapshot so
+  // AgentCard evaluates the same plant state that SimulationRuntime uses.
+  const snapshot = SimulationRuntime.getSnapshot();
+  _.heatpump.load = snapshot.heatpumpLevel / HEATPUMP_LEVELS;
+};
+
+const setAiCriticalScenario = () => {
+  // Fixed reproducible test configuration. We do not dynamically tune Z or
+  // projection factors merely to cross the 2% line.
+  selectScenario('realistic');
+  setGridPreset('typical');
+  setSimulationScenario('ai_vuf_over_2');
+};
+
+const dropSimulationL3 = () => {
+  SimulationRuntime.dropPhase('c');
+};
+
+const restoreSimulationL3 = () => {
+  SimulationRuntime.restorePhase('c');
+};
+
+const resetSimulation = () => {
+  SimulationRuntime.reset();
+  const snapshot = SimulationRuntime.getSnapshot();
+  _.heatpump.load = snapshot.heatpumpLevel / HEATPUMP_LEVELS;
+};
+
+const init = () => {
+  selectScenario('realistic');
+  bindRuntime();
+
+  unwatchRuntimeMode = watch(
+    () => App._.mode,
+    () => bindRuntime()
+  );
 
   animationFrame = requestAnimationFrame(animate);
 };
@@ -327,10 +546,9 @@ onMounted(init);
 
 onUnmounted(() => {
   if (animationFrame) cancelAnimationFrame(animationFrame);
-  unwatchHeatpump?.();
-  App.EnergyMeterService.off?.('data', onEnergyMeter);
-  App.WallboxService.off?.('data', onWallbox);
-  App.BatteryService.off?.('data', onBattery);
+  unwatchRuntimeMode?.();
+  unwatchRuntimeMode = null;
+  unbindRuntime();
 });
 </script>
 
@@ -341,16 +559,104 @@ onUnmounted(() => {
         <h1 style='font-size:3em;padding:0;line-height: 2em;margin-bottom:-0.4em;'>SENERGATE</h1>
         <p style='font-size:1em;padding-bottom:1em'>Smart Energy Gateway · Frontstage</p>
       </div>
+
+      <div class="runtime-switch">
+        <span class="runtime-label">RUN MODE</span>
+        <button
+          type="button"
+          :class="{ selected: isSimulation }"
+          @click="setRuntimeMode('simulation')"
+        >
+          SIMULATION
+        </button>
+        <button
+          type="button"
+          :class="{ selected: !isSimulation }"
+          @click="setRuntimeMode('real')"
+        >
+          REAL HARDWARE
+        </button>
+        <span class="runtime-status" :class="isSimulation ? 'sim' : (App._.connected ? 'online' : 'offline')">
+          {{ isSimulation ? 'LOCAL ONLY · NO MQTT ACTUATION' : (App._.connected ? 'Pi5 CONNECTED' : 'Pi5 DISCONNECTED') }}
+        </span>
+      </div>
     </header>
+
+    <div v-if="isSimulation" class="simulation-test-panel">
+      <div>
+        <strong>Digital-Twin Test Mode / 数字孪生测试模式</strong>
+        <p>
+          Alle Bedienaktionen bleiben lokal im Browser. Keine Aktor-Kommandos werden an MQTT, Shelly, ESP32 oder ATV12 gesendet.
+          / 所有控制仅作用于本地模型，不会向 MQTT、Shelly、ESP32 或 ATV12 发送执行命令。
+        </p>
+      </div>
+      <div class="simulation-actions">
+        <button type="button" @click="setSimulationScenario('balanced')">Balanced</button>
+        <button type="button" @click="setSimulationScenario('l1_overload')">L1 Overload</button>
+        <button type="button" @click="setSimulationScenario('l2_overload')">L2 Overload</button>
+        <button type="button" class="ai-test" @click="setAiCriticalScenario">AI TEST &gt; 2%</button>
+        <button type="button" class="fault" @click="dropSimulationL3">Drop L3</button>
+        <button type="button" @click="restoreSimulationL3">Restore L3</button>
+        <button type="button" @click="resetSimulation">Reset Twin</button>
+      </div>
+    </div>
+
+    <div v-if="isSimulation" class="grid-impedance-panel">
+      <div class="grid-panel-head">
+        <div>
+          <strong>Senergate Grid Impedance / Netzimpedanz / 电网阻抗</strong>
+          <p>
+            MODELED simulation parameters. VUF remains ESTIMATED. These values are not measured/calibrated site data.
+            / 仅用于模型仿真；VUF 仍为 ESTIMATED，这些参数不是当前现场实测/校准值。
+          </p>
+        </div>
+        <span class="grid-provenance">{{ _.grid.provenance.toUpperCase() }}</span>
+      </div>
+
+      <div class="grid-preset-actions">
+        <span>Grid scenario:</span>
+        <button type="button" :class="{ selected: _.grid.preset === 'stiff' }" @click="setGridPreset('stiff')">Stiff LV</button>
+        <button type="button" :class="{ selected: _.grid.preset === 'typical' }" @click="setGridPreset('typical')">Typical Feeder</button>
+        <button type="button" :class="{ selected: _.grid.preset === 'weak' }" @click="setGridPreset('weak')">Weak Feeder</button>
+        <span class="grid-name">{{ gridPresetLabel }}</span>
+      </div>
+
+      <div class="grid-parameter-grid">
+        <label>
+          <span>R<sub>phase</sub> [Ω]</span>
+          <input v-model.number="_.grid.rPhase" type="number" min="0" max="1" step="0.005" @input="markGridCustom" />
+        </label>
+        <label>
+          <span>X<sub>phase</sub> [Ω]</span>
+          <input v-model.number="_.grid.xPhase" type="number" min="0" max="1" step="0.005" @input="markGridCustom" />
+        </label>
+        <label>
+          <span>R<sub>N</sub> [Ω]</span>
+          <input v-model.number="_.grid.rNeutral" type="number" min="0" max="1" step="0.005" @input="markGridCustom" />
+        </label>
+        <label>
+          <span>X<sub>N</sub> [Ω]</span>
+          <input v-model.number="_.grid.xNeutral" type="number" min="0" max="1" step="0.005" @input="markGridCustom" />
+        </label>
+      </div>
+
+      <div class="grid-derived">
+        <span>|Z<sub>phase</sub>| = {{ phaseImpedanceMagnitude.toFixed(3) }} Ω</span>
+        <span>|Z<sub>N</sub>| = {{ neutralImpedanceMagnitude.toFixed(3) }} Ω</span>
+        <span>|V<sub>N</sub>| = {{ neutralVoltageDropMagnitude !== null ? `${neutralVoltageDropMagnitude.toFixed(2)} V` : '--' }}</span>
+        <span>Model: V<sub>LN</sub> = E − Z<sub>phase</sub>I − Z<sub>N</sub>I<sub>N</sub></span>
+      </div>
+    </div>
 
     <div class="overview-grid">
       <CurrentCard
-        :currents="measuredCurrents"
-        :y-range="{ min: 0, max: 100 }"
+        :currents="projectedCurrents"
+        :y-range="currentYRange"
+        :source-label="currentSourceLabel"
       />
 
       <PhasorCard
-        :voltages="measuredVoltages"
+        :voltages="twinVoltages"
         :angles="_.vuf.sourceAngle"
       />
 
@@ -364,18 +670,19 @@ onUnmounted(() => {
         :predict-vuf="predictVufForDeviceState"
         @apply-state="applyAgentDeviceState"
         @enabled-change="onAgentEnabledChange"
-        @heatpump-zero-hold="sendHeatpumpZeroHold"
+        @heatpump-zero-hold="requestHeatpumpZeroHold"
       />
     </div>
 
     <div class="footer-meta">
       <span>
+        Data source: {{ isSimulation ? 'DIGITAL TWIN SIMULATED' : 'REAL HARDWARE' }} ·
         Measurement age:
-        {{ _.energy_meter.timedelta !== null ? `${_.energy_meter.timedelta.toFixed(1)} s` : '--' }} · Demo-scaled data source
+        {{ _.energy_meter.timedelta !== null ? `${_.energy_meter.timedelta.toFixed(1)} s` : '--' }}
       </span>
 
       <span>
-        Scenario:
+        Source phasor:
         <button type="button" :class="{ selected: _.vuf.scenario === 'ideal' }" @click="selectScenario('ideal')">
           Ideal
         </button>
@@ -388,5 +695,5 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.simulated{border-color:#65455c;color:#ffc2e5}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}}@media(max-width:700px){.dashboard{padding:10px}.topbar,.footer-meta{flex-direction:column;align-items:flex-start}}
+.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-switch button,.simulation-actions button{padding:7px 10px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px;font-weight:700}.runtime-switch button.selected{border-color:#58e7ff;color:#eaf6ff;background:#103044}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.sim{color:#ffc2e5;border-color:#65455c}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.simulation-test-panel{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-top:14px;padding:12px 16px;border:1px solid #65455c;border-radius:16px;background:#15121b}.simulation-test-panel strong{font-size:12px}.simulation-test-panel p{max-width:760px;margin:4px 0 0;color:#bca5b6;font-size:10px;line-height:1.5}.simulation-actions{display:flex;justify-content:flex-end;gap:7px;flex-wrap:wrap}.simulation-actions button.fault{border-color:#6b3740;color:#ff9ba4}.simulation-actions button.ai-test{border-color:#d19c39;color:#ffe7a5;background:#2a2110}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.simulated{border-color:#65455c;color:#ffc2e5}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.simulation-test-panel{align-items:flex-start;flex-direction:column}.simulation-actions{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
 </style>

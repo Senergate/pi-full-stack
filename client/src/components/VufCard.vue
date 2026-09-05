@@ -1,6 +1,6 @@
 <template>
   <section class="vuf-card">
-    <div class="eyebrow">Simulated three-phase voltage unbalance</div>
+    <div class="eyebrow">Estimated three-phase voltage unbalance</div>
 
     <div class="big-status">
       <div class="value">{{ formattedVuf }}</div>
@@ -39,7 +39,8 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 const props = defineProps({
   vuf: {
     type: Number,
-    required: true,
+    required: false,
+    default: null,
   },
 });
 
@@ -63,49 +64,43 @@ const graphState = reactive({
 });
 
 const safeVuf = computed(() => {
+  if (props.vuf === null || props.vuf === undefined || props.vuf === '') {
+    return null;
+  }
+
   const value = Number(props.vuf);
-
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
+  return Number.isFinite(value) ? Math.max(0, value) : null;
 });
 
-const formattedVuf = computed(() => {
-  return `${safeVuf.value.toFixed(1)}%`;
-});
+const formattedVuf = computed(() =>
+  safeVuf.value === null ? '--' : `${safeVuf.value.toFixed(1)}%`
+);
 
 const statusLabel = computed(() => {
-  if (safeVuf.value > 2) {
-    return 'HIGH';
-  }
-
-  if (safeVuf.value > 1) {
-    return 'BALANCING';
-  }
-
+  if (safeVuf.value === null) return 'NO DATA';
+  if (safeVuf.value > 2) return 'HIGH';
+  if (safeVuf.value > 1) return 'BALANCING';
   return 'BALANCED';
 });
 
 const statusClass = computed(() => {
-  if (safeVuf.value > 2) {
-    return 'bad';
-  }
-
-  if (safeVuf.value > 1) {
-    return 'warn';
-  }
-
+  if (safeVuf.value === null) return 'unknown';
+  if (safeVuf.value > 2) return 'bad';
+  if (safeVuf.value > 1) return 'warn';
   return 'good';
 });
 
-const gaugeWidth = computed(() => {
-  return `${Math.min(100, (safeVuf.value / 4) * 100)}%`;
-});
+const gaugeWidth = computed(() =>
+  safeVuf.value === null ? '0%' : `${Math.min(100, (safeVuf.value / 4) * 100)}%`
+);
 
 const addPoint = value => {
-  const numericValue = Number(value);
-
-  if (!Number.isFinite(numericValue)) {
+  if (value === null || value === undefined || value === '') {
     return;
   }
+
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return;
 
   graphState.data.push({
     ts: performance.now(),
@@ -445,6 +440,10 @@ onUnmounted(() => {
 
 .warn {
   color: var(--yellow);
+}
+
+.unknown {
+  color: #789aac;
 }
 
 .bad {

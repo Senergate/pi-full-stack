@@ -1,59 +1,43 @@
-# Senergate pi-full-stack Merge Notes / Zusammenführungsnotizen (CN/DE)
+# Senergate pi-full-stack AI Grid Merge Notes / 合并说明
 
-## 德语任务重述 / Präzisierte Aufgabenstellung
-`pi-full-stack(3).zip` wird als fehlerfreie Hauptbasis verwendet und mit ausgewählten Elementen aus `pi-full-stack_Jonas.zip` zusammengeführt. Die bestätigten Entscheidungen des Users waren: `1C, 2A, 3C, 4A, 5B, 6A, 7C`.
+## Deutsch
 
-## 合并基线 / Merge-Basis
-- 主版本 / Hauptbasis: `pi-full-stack(3).zip`
-- 参考版本 / Referenz: `pi-full-stack_Jonas.zip`
-- 输出 / Ausgabe: `pi-full-stack_merged.zip` + `pi-full-stack_merged_vs_base3.patch`
+Diese Version verbindet `pi-full-stack_simulation_real_ai_grid(3)` mit den sicheren Steuersemantiken aus `pi-full-stack_merged`.
 
-## 已执行的合并决定 / Umgesetzte Entscheidungen
+Umgesetzt:
 
-### 1C — AgentCard：当前 UI + pending + predicted
-中文：保留当前版本的 Frontstage UI 和 predicted VUF 展示，同时恢复 Jonas 版本的 pending 思想：命令发出后，设备卡片会以黄色 pending 状态显示，直到实际反馈状态追上目标状态。
+1. `pi-full-stack_simulation_real_ai_grid(3)` bleibt die Rechen- und Anzeige-Basis: `SimulationRuntime`, SIMULATION/REAL-HARDWARE-Umschaltung, Grid-Impedance-Panel, raw/measured/projected-Trennung und fail-closed VUF-Eingänge bleiben erhalten.
+2. Die Netzwerk-Konfiguration bleibt wie in Version A: `App.js` nutzt weiterhin den Pi5 Socket.IO Endpoint `10.20.0.200:4000`, `server/config.js` bleibt auf `pi_ip=10.20.0.200`, HTTP-Port `4000`, MQTT-Port `1883`.
+3. Branch-A Heatpump-Semantik aus Version A wurde wiederhergestellt: `OFF -> stop,0`, `ZERO HOLD -> start,0`, `RUN -> start,<legacy-normalized-load*10>`.
+4. `AgentCard.vue` enthält wieder COMMAND-PENDING-Anzeige, Pending-Markierung pro Device, ZERO-HOLD-Button und manuelle Sperre der Wallbox-Levelbuttons im Auto-Modus.
+5. `SimpleDashboard.vue` übergibt den Heatpump-Command-Mode bis zum Server beziehungsweise zur Simulation.
+6. `SimulationRuntime.EspService.heatpump(load, mode)` akzeptiert denselben Mode wie die reale Runtime, bleibt aber vollständig lokal und sendet kein MQTT.
+7. `PhasorCalculator.buildCurrentPhasorsFromPF()` nutzt jetzt die jeweiligen `sourceAngles` als Spannungsreferenz, damit nicht-ideale Quellwinkel keine inkonsistente Zeigergeometrie erzeugen.
+8. Jonas/A-Root-Dateien wurden wiederhergestellt: `.gitignore`, `.prettierrc`, `README.md`, `mango-router-recovery-guide.md`.
 
-Deutsch: Die aktuelle Frontstage-UI und die Predicted-VUF-Anzeige bleiben erhalten. Zusätzlich wird die Pending-Idee aus Jonas wieder eingeführt: Nach einem Kommando markiert die Gerätekarte den Zustand als pending, bis der gemeldete Ist-Zustand den Zielzustand erreicht.
+## 中文
 
-### 2A — Battery：relay ON = charging
-中文：后端 `BatteryService.set(charging)` 现在明确表示 `true = charging = Shelly relay ON`。前端也统一使用 `battery.charging`，避免 `charging/discharging` 反向布尔语义。
+这个版本把 `pi-full-stack_simulation_real_ai_grid(3)` 的运算/展示优势，与 `pi-full-stack_merged` 中更安全的控制语义合并。
 
-Deutsch: `BatteryService.set(charging)` bedeutet nun eindeutig `true = charging = Shelly relay ON`. Das Frontend nutzt ebenfalls `battery.charging`.
+已完成：
 
-### 3C — Heatpump OFF 与 ZERO_HOLD 分开
-中文：`OFF` 发送 `stop,0`；`ZERO HOLD` 单独发送 `start,0`。服务端 `EspService.heatpump(load, mode)` 支持 `mode='stop' | 'zero_hold' | 'start'`。
+1. 以 `pi-full-stack_simulation_real_ai_grid(3)` 为运算和展示基础，保留 `SimulationRuntime`、SIMULATION/REAL HARDWARE 切换、Grid Impedance 面板、raw/measured/projected 分层和 VUF fail-closed 输入处理。
+2. 网络配置继续选择 A：`App.js` 仍连接 Pi5 Socket.IO `10.20.0.200:4000`，`server/config.js` 保持 `pi_ip=10.20.0.200`、HTTP 端口 `4000`、MQTT 端口 `1883`。
+3. 恢复 A 的 Branch-A Heatpump 控制语义：`OFF -> stop,0`，`ZERO HOLD -> start,0`，`RUN -> start,<legacy-normalized-load*10>`。
+4. `AgentCard.vue` 恢复 COMMAND-PENDING 显示、每个设备的 pending 标记、ZERO-HOLD 按钮，以及 Auto 模式下锁定 Wallbox level 手动按钮。
+5. `SimpleDashboard.vue` 把 heatpump command mode 传给真实 server 或本地 simulation。
+6. `SimulationRuntime.EspService.heatpump(load, mode)` 接受与真实 runtime 一样的 mode，但仍然只在浏览器本地模型中执行，不发送 MQTT。
+7. `PhasorCalculator.buildCurrentPhasorsFromPF()` 现在使用对应相的 `sourceAngles` 作为电压参考，避免非理想电压角下电流相量几何不一致。
+8. 恢复 Jonas/A 根目录文件：`.gitignore`、`.prettierrc`、`README.md`、`mango-router-recovery-guide.md`。
 
-Deutsch: `OFF` sendet `stop,0`; `ZERO HOLD` sendet explizit `start,0`. Der Server unterstützt `EspService.heatpump(load, mode)`.
+## Test
 
-### 4A — Wallbox 继续直接 Shelly 控制
-中文：保持当前 demo 路径 `WallboxService.set()` → Shelly MQTT，不切换到 ESP32 Branch-B Agent。
+Neue zusätzliche Tests:
 
-Deutsch: Der direkte Demo-Pfad über `WallboxService.set()` und Shelly MQTT bleibt erhalten.
+- `tests/merged_control_semantics_test.mjs`
 
-### 5B — raw/scaled 分离，但 UI 仍显示 demoScaled
-中文：`SimpleDashboard.vue` 现在保留 `energy_meter.rawData`，同时生成 `energy_meter.demoScaled`。UI 使用 demoScaled；旧字段 `energy_meter.data` 仅作为兼容别名。
+Bestehende Tests aus Version B bleiben erhalten:
 
-Deutsch: `SimpleDashboard.vue` behält `energy_meter.rawData` und erzeugt separat `energy_meter.demoScaled`. Die UI zeigt demoScaled; `energy_meter.data` bleibt nur ein Kompatibilitätsalias.
-
-### 6A — 恢复 Jonas 根目录文档
-中文：恢复 `.gitignore`、`.prettierrc`、`README.md`、`mango-router-recovery-guide.md`。同时 `.gitignore` 补充 `*.zip`、`node_modules/`、`dist/`、`build/`，防止再次提交嵌套压缩包或构建产物。
-
-Deutsch: `.gitignore`, `.prettierrc`, `README.md` und `mango-router-recovery-guide.md` wurden wiederhergestellt. `.gitignore` wurde um generierte Artefakte ergänzt.
-
-### 7C — 输出完整 zip + patch
-中文：同时提供完整合并版 zip 和相对 `pi-full-stack(3).zip` 的 patch/diff 文件。
-
-Deutsch: Es gibt sowohl ein komplettes ZIP als auch einen Patch gegen `pi-full-stack(3).zip`.
-
-## 重点修改文件 / Wichtig geänderte Dateien
-- `client/src/components/AgentCard.vue`
-- `client/src/components/SimpleDashboard.vue`
-- `server/BatteryService.js`
-- `server/EspService.js`
-- `client/src/components/CurrentCard.vue`
-- `.gitignore`
-
-## 注意 / Hinweise
-中文：这个合并版本保持 Wallbox direct-Shelly demo 路径。若之后要进入正式 Senergate 架构，应把 Wallbox 统一到 ESP32 Branch-B Agent，并引入 ACK/status/execution truth。
-
-Deutsch: Diese Version behält den direkten Shelly-Demo-Pfad für die Wallbox. Für die Zielarchitektur sollte später auf ESP32 Branch-B Agent, ACK, Status und Execution Truth umgestellt werden.
+- `tests/bugfix3_smoke_test.mjs`
+- `tests/simulation_runtime_test.mjs`
+- `tests/simulation_ai_grid_test.mjs`

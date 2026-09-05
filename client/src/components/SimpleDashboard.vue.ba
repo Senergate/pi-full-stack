@@ -386,7 +386,6 @@ const onWallbox = data => {
 };
 
 const onBattery = data => {
-  console.log(data)
   _.battery.discharging = data.output;
 };
 

@@ -1,3 +1,9 @@
+const finiteOrNull = value => {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
 const PhasorCalculator = {
   // Return the magnitude of a complex number.
   complexMagnitude: value => Math.hypot(value.re, value.im),
@@ -24,28 +30,27 @@ const PhasorCalculator = {
 
   // Build current phasors from measured RMS currents and PF values.
   //
-  // Voltage reference angles:
-  // L1 =   0 deg
-  // L2 = -120 deg
-  // L3 = +120 deg
+  // For an inductive load the current lags its OWN phase voltage:
+  // I_angle[phase] = sourceAngle[phase] - acos(PF[phase]).
   //
-  // For an inductive load:
-  // I_angle = V_angle - acos(PF)
-  buildCurrentPhasorsFromPF: (currents, powerFactors = { a: 1, b: 1, c: 1 }) => {
-    const baseAngles = {
-      a: 0,
-      b: -120,
-      c: 120,
-    };
-
+  // This avoids inconsistent geometry when the source-voltage angles are
+  // intentionally modeled as non-ideal, e.g. -120.2° / +119.8°.
+  buildCurrentPhasorsFromPF: (
+    currents,
+    powerFactors = { a: 1, b: 1, c: 1 },
+    sourceAngles = { a: 0, b: -120, c: 120 }
+  ) => {
     const result = {};
 
     for (const phase of ['a', 'b', 'c']) {
-      const current = Number(currents?.[phase] ?? 0);
-      const pf = Number(powerFactors?.[phase] ?? 1);
+      const current = finiteOrNull(currents?.[phase]);
+      const pf = finiteOrNull(powerFactors?.[phase]);
+      const sourceAngle = finiteOrNull(sourceAngles?.[phase]);
+
+      if (current === null || pf === null || sourceAngle === null || current < 0) return null;
 
       const phi = PhasorCalculator.powerFactorToAngle(pf);
-      const angle = baseAngles[phase] - phi;
+      const angle = sourceAngle - phi;
 
       result[phase] = PhasorCalculator.polarToComplex(current, angle);
     }
@@ -89,15 +94,45 @@ const PhasorCalculator = {
     c: PhasorCalculator.complexMultiply(impedances.c, currentPhasors.c),
   }),
 
+  // Build neutral impedance ZN = RN + jXN.
+  buildNeutralImpedance: (resistance = 0, reactance = 0) => ({
+    re: Number(resistance ?? 0),
+    im: Number(reactance ?? 0),
+  }),
+
+  // Fundamental neutral-current phasor: IN = IA + IB + IC.
+  computeNeutralCurrentPhasor: currentPhasors =>
+    PhasorCalculator.complexAdd(
+      PhasorCalculator.complexAdd(currentPhasors.a, currentPhasors.b),
+      currentPhasors.c
+    ),
+
+  // Neutral-point displacement VN = ZN * IN.
+  computeNeutralVoltageDrop: (neutralCurrentPhasor, neutralImpedance) =>
+    PhasorCalculator.complexMultiply(neutralImpedance, neutralCurrentPhasor),
+
   // Calculate simulated load-node voltages:
   //
-  // V_load = V_source - Z * I
-  computeLoadVoltages: (sourceVoltages, voltageDrops) => ({
-    a: PhasorCalculator.complexSubtract(sourceVoltages.a, voltageDrops.a),
+  // VAN = EA - ZA*IA - VN
+  // VBN = EB - ZB*IB - VN
+  // VCN = EC - ZC*IC - VN
+  //
+  // With ZN = 0 this is backward-compatible with the previous phase-only model.
+  computeLoadVoltages: (sourceVoltages, voltageDrops, neutralVoltageDrop = { re: 0, im: 0 }) => ({
+    a: PhasorCalculator.complexSubtract(
+      PhasorCalculator.complexSubtract(sourceVoltages.a, voltageDrops.a),
+      neutralVoltageDrop
+    ),
 
-    b: PhasorCalculator.complexSubtract(sourceVoltages.b, voltageDrops.b),
+    b: PhasorCalculator.complexSubtract(
+      PhasorCalculator.complexSubtract(sourceVoltages.b, voltageDrops.b),
+      neutralVoltageDrop
+    ),
 
-    c: PhasorCalculator.complexSubtract(sourceVoltages.c, voltageDrops.c),
+    c: PhasorCalculator.complexSubtract(
+      PhasorCalculator.complexSubtract(sourceVoltages.c, voltageDrops.c),
+      neutralVoltageDrop
+    ),
   }),
 
   // Compute VUF from positive- and negative-sequence voltage.
@@ -152,8 +187,40 @@ const PhasorCalculator = {
       b: 0,
       c: 0,
     },
+
+    neutralResistance = 0,
+    neutralReactance = 0,
   }) => {
-    const currentPhasors = PhasorCalculator.buildCurrentPhasorsFromPF(currents, powerFactors);
+    const requiredValues = [
+      ...['a', 'b', 'c'].map(p => finiteOrNull(currents?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(powerFactors?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(sourceVoltages?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(sourceAngles?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(resistance?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(reactance?.[p])),
+      finiteOrNull(neutralResistance),
+      finiteOrNull(neutralReactance),
+    ];
+
+    if (requiredValues.some(value => value === null)) {
+      return {
+        vufPercent: null,
+        positiveSequenceMagnitude: null,
+        negativeSequenceMagnitude: null,
+        error: 'Missing or invalid VUF input. No fail-open substitution is allowed.',
+      };
+    }
+
+    const currentPhasors = PhasorCalculator.buildCurrentPhasorsFromPF(currents, powerFactors, sourceAngles);
+
+    if (!currentPhasors) {
+      return {
+        vufPercent: null,
+        positiveSequenceMagnitude: null,
+        negativeSequenceMagnitude: null,
+        error: 'Invalid current phasor input.',
+      };
+    }
 
     const sourceVoltagePhasors = PhasorCalculator.buildSourceVoltagePhasors(sourceVoltages, sourceAngles);
 
@@ -161,7 +228,17 @@ const PhasorCalculator = {
 
     const voltageDrops = PhasorCalculator.computeVoltageDrops(currentPhasors, impedances);
 
-    const loadVoltagePhasors = PhasorCalculator.computeLoadVoltages(sourceVoltagePhasors, voltageDrops);
+    const neutralImpedance = PhasorCalculator.buildNeutralImpedance(neutralResistance, neutralReactance);
+
+    const neutralCurrentPhasor = PhasorCalculator.computeNeutralCurrentPhasor(currentPhasors);
+
+    const neutralVoltageDrop = PhasorCalculator.computeNeutralVoltageDrop(neutralCurrentPhasor, neutralImpedance);
+
+    const loadVoltagePhasors = PhasorCalculator.computeLoadVoltages(
+      sourceVoltagePhasors,
+      voltageDrops,
+      neutralVoltageDrop
+    );
 
     // Reuse the existing generic symmetrical-component function.
     const sequenceComponents = PhasorCalculator.computeSequenceComponents(loadVoltagePhasors);
@@ -174,6 +251,9 @@ const PhasorCalculator = {
       currentPhasors,
       sourceVoltagePhasors,
       impedances,
+      neutralImpedance,
+      neutralCurrentPhasor,
+      neutralVoltageDrop,
       voltageDrops,
       loadVoltagePhasors,
       sequenceComponents,
@@ -217,20 +297,20 @@ const PhasorCalculator = {
   // Validate measured RMS currents and manually assigned phase angles.
   validateInputs: (measuredCurrents, phaseAngles) => {
     const currents = {
-      a: Number(measuredCurrents?.a),
-      b: Number(measuredCurrents?.b),
-      c: Number(measuredCurrents?.c),
+      a: finiteOrNull(measuredCurrents?.a),
+      b: finiteOrNull(measuredCurrents?.b),
+      c: finiteOrNull(measuredCurrents?.c),
     };
 
     const angles = {
-      a: Number(phaseAngles?.a),
-      b: Number(phaseAngles?.b),
-      c: Number(phaseAngles?.c),
+      a: finiteOrNull(phaseAngles?.a),
+      b: finiteOrNull(phaseAngles?.b),
+      c: finiteOrNull(phaseAngles?.c),
     };
 
     const values = [currents.a, currents.b, currents.c, angles.a, angles.b, angles.c];
 
-    if (values.some(value => !Number.isFinite(value))) {
+    if (values.some(value => value === null)) {
       return {
         valid: false,
         currents,

@@ -5,6 +5,8 @@ import { io } from 'socket.io-client';
 const App = {
   _: reactive({
     connected: false,
+    // Safe default for development: local simulation never sends actuator MQTT.
+    mode: 'simulation',
   }),
 
   io: io('10.20.0.200:4000', { maxHttpBufferSize: 20 * 1024 * 1024 }),
@@ -16,6 +18,12 @@ const App = {
   },
 
   wait: time => new Promise(resolve => setTimeout(resolve, time)),
+
+  setMode: mode => {
+    if (mode !== 'simulation' && mode !== 'real') return false;
+    App._.mode = mode;
+    return true;
+  },
 };
 
 App.io.on('connect', async () => {

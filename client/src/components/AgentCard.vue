@@ -158,6 +158,7 @@
           <span>Battery charging</span>
           <span>L3</span>
         </div>
+        <small v-if="pendingDevices.batteryCharging" class="pending-note">pending → {{ pendingTargetState.batteryCharging ? 'ON' : 'OFF' }}</small>
 
         <button
           type="button"
@@ -168,7 +169,6 @@
         >
           {{ displayedState.batteryCharging ? 'ON' : 'OFF' }}
         </button>
-        <small v-if="pendingDevices.batteryCharging" class="pending-note">pending → {{ pendingTargetState.batteryCharging ? 'ON' : 'OFF' }}</small>
       </div>
     </div>
 
@@ -196,7 +196,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
 /*
  * ============================================================
@@ -243,7 +243,8 @@ const MIN_LOAD_RATIO = 0.5;
 const props = defineProps({
   vuf: {
     type: Number,
-    required: true,
+    required: false,
+    default: null,
   },
 
   /*
@@ -377,6 +378,10 @@ watch(
  */
 
 const conditionForVuf = value => {
+  if (value === null || value === undefined || value === '') {
+    return { label: 'Unknown', className: 'unknown' };
+  }
+
   const numeric = Number(value);
 
   if (!Number.isFinite(numeric)) {
@@ -445,8 +450,8 @@ const cooldownProgress = computed(() =>
  */
 
 const formatVuf = value => {
+  if (value === null || value === undefined || value === '') return '--';
   const numeric = Number(value);
-
   return Number.isFinite(numeric) ? `${numeric.toFixed(2)}%` : '--';
 };
 
@@ -484,11 +489,13 @@ const addLog = (title, message = '', type = 'info') => {
 
 const predictCandidate = async state => {
   try {
-    const predicted = Number(await props.predictVuf(state));
-
-    if (!Number.isFinite(predicted)) {
+    const rawPrediction = await props.predictVuf(state);
+    if (rawPrediction === null || rawPrediction === undefined || rawPrediction === '') {
       return null;
     }
+
+    const predicted = Number(rawPrediction);
+    if (!Number.isFinite(predicted)) return null;
 
     return {
       state,
@@ -728,7 +735,7 @@ const evaluateCandidates = async candidates => {
  *
  * 4. Wait five seconds after every physical action.
  *
- * 5. Then inspect estimated VUF again.
+ * 5. Then inspect measured VUF again.
  */
 
 const chooseNextAction = async () => {
@@ -861,10 +868,10 @@ const selectAndApplyState = async repeatedViolation => {
     }
 
     /*
-     * Send exactly ONE new state and keep a visual pending marker until feedback catches up.
+     * Send exactly ONE new state and keep a visible pending marker until
+     * the reported device state catches up.
      */
     markPendingChanges(action.state);
-
     emit('apply-state', {
       ...action.state,
     });
@@ -893,11 +900,14 @@ const evaluateAgent = async () => {
     return;
   }
 
-  const currentVuf = Number(props.vuf);
-
-  if (!Number.isFinite(currentVuf)) {
+  if (props.vuf === null || props.vuf === undefined || props.vuf === '') {
+    agentState.value = 'monitoring';
+    prediction.value = null;
     return;
   }
+
+  const currentVuf = Number(props.vuf);
+  if (!Number.isFinite(currentVuf)) return;
 
   /*
    * --------------------------------------------------------
@@ -916,7 +926,7 @@ const evaluateAgent = async () => {
     /*
      * Five seconds have passed.
      *
-     * Now use the latest estimated VUF.
+     * Now use the ACTUAL newly measured VUF.
      */
     if (currentVuf > CRITICAL_VUF) {
       await selectAndApplyState(true);
@@ -1465,7 +1475,6 @@ h3 {
   font-size: 10px;
   text-align: center;
 }
-
 .device.pending {
   border-color: #ffd166;
   box-shadow: 0 0 0 1px rgba(255, 209, 102, 0.25), 0 0 20px rgba(255, 209, 102, 0.08);
@@ -1479,7 +1488,7 @@ h3 {
   margin-top: -4px;
   margin-bottom: 8px;
   font-size: 10px;
-  letter-spacing: .03em;
+  letter-spacing: 0.03em;
 }
 .zero-hold-button {
   margin-top: 6px;

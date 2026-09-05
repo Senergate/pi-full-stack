@@ -2,7 +2,7 @@
   <section class="current-card">
     <div class="card-header">
       <div>
-        <div class="eyebrow">Demo-scaled phase loading</div>
+        <div class="eyebrow">{{ sourceLabel }}</div>
         <h2>Phase Currents</h2>
       </div>
 
@@ -67,6 +67,11 @@
 import { computed } from 'vue'
 
 const props = defineProps({
+  sourceLabel: {
+    type: String,
+    default: 'SCALED FROM MEASURED · Digital Twin',
+  },
+
   /*
    * Same phase-key convention as SimpleDashboard:
    *
@@ -142,17 +147,16 @@ const safeMax = computed(() => {
 const phases = computed(() => {
   return phaseDefinitions.map(
     definition => {
+      const rawValue = props.currents?.[definition.key]
       const raw =
-        Number(
-          props.currents?.[
-            definition.key
-          ],
-        )
+        rawValue === null || rawValue === undefined || rawValue === ''
+          ? null
+          : Number(rawValue)
 
       const current =
-        Number.isFinite(raw)
+        raw !== null && Number.isFinite(raw)
           ? raw
-          : 0
+          : null
 
       /*
        * Clamp only the visual representation.
@@ -164,13 +168,12 @@ const phases = computed(() => {
        * bar height = 100%
        */
       const clamped =
-        Math.max(
-          safeMin.value,
-          Math.min(
-            safeMax.value,
-            current,
-          ),
-        )
+        current === null
+          ? safeMin.value
+          : Math.max(
+              safeMin.value,
+              Math.min(safeMax.value, current),
+            )
 
       const height =
         (

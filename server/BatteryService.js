@@ -1,8 +1,10 @@
 const BatteryService = {
   name: 'BatteryService',
+  // Senergate merge decision 2A:
+  // true = Battery CHARGING command, false = charger OFF.
+  // Do not use this boolean for discharge; use a future enum for charge/discharge/idle.
   set: (charging) => {
     const bus = BatteryService.server.services.get('MqttService').bus;
-    // Senergate merge decision 2A: Shelly relay ON means Battery CHARGING.
     bus.publish(`shelly-battery/command/switch:0`, charging ? 'on' : 'off');
   },
   requestUpdate: () => {
