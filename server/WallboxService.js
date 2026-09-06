@@ -44,7 +44,7 @@ const WallboxService = {
       if (!topic.startsWith('branch-b-shelly/status/switch:')) return;
       try {
         const payload = normalizeSwitchStatus(topic, JSON.parse(message.toString()));
-        server.io.emit('WallboxService', 'data', payload);
+        server.emitServiceEvent('WallboxService', 'data', payload);
       } catch (err) {
         console.error(`Invalid MQTT payload on ${topic}:`, err);
       }

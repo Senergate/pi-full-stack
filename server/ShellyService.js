@@ -15,7 +15,7 @@ const ShellyService = {
       if (topic !== 'shellypro3em-ece334e62cdc/status/em:0') return;
       try {
         const payload = JSON.parse(message.toString());
-        server.io.emit('ShellyService', 'data', payload);
+        server.emitServiceEvent('ShellyService', 'data', payload);
       } catch {
         console.log(message.toString());
       }

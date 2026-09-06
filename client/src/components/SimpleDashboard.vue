@@ -87,8 +87,8 @@ const _ = reactive({
   },
   agent: { enabled: false },
   realFeedback: {
-    branchA: { payload: null, lastUpdate: null },
-    branchB: { payload: null, lastUpdate: null },
+    branchA: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
+    branchB: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
   },
 });
 
@@ -335,6 +335,20 @@ const controlBlockedReason = computed(() => {
   return '';
 });
 
+
+const commandFeedback = computed(() => ({
+  branchA: {
+    ack: _.realFeedback.branchA.ack,
+    status: _.realFeedback.branchA.payload,
+    commanded: _.heatpump.commanded,
+    fresh: branchAReady.value,
+  },
+  branchB: {
+    ack: _.realFeedback.branchB.ack,
+    status: _.realFeedback.branchB.payload,
+  },
+}));
+
 const neutralVoltageDropMagnitude = computed(() => {
   const value = vufResult.value?.neutralVoltageDrop;
   if (!value || !Number.isFinite(value.re) || !Number.isFinite(value.im)) return null;
@@ -479,6 +493,16 @@ const onEnergyMeter = payload => {
   _.energy_meter.lastUpdate = performance.now();
 };
 
+const onBranchAAck = payload => {
+  _.realFeedback.branchA.ack = payload;
+  _.realFeedback.branchA.ackUpdate = performance.now();
+};
+
+const onBranchBAck = payload => {
+  _.realFeedback.branchB.ack = payload;
+  _.realFeedback.branchB.ackUpdate = performance.now();
+};
+
 const onBranchAStatus = payload => {
   _.realFeedback.branchA.payload = payload;
   _.realFeedback.branchA.lastUpdate = performance.now();
@@ -600,7 +624,9 @@ const unbindRuntime = () => {
   boundRuntime.WallboxService?.off?.('data', onWallbox);
   boundRuntime.BatteryService?.off?.('data', onBattery);
   boundRuntime.EspService?.off?.('branchA', onBranchAStatus);
+  boundRuntime.EspService?.off?.('branchA_ack', onBranchAAck);
   boundRuntime.EspService?.off?.('branchB', onBranchBStatus);
+  boundRuntime.EspService?.off?.('branchB_ack', onBranchBAck);
   boundRuntime.BranchBService?.off?.('branchB', onBranchBStatus);
 
   if (boundRuntime === SimulationRuntime) {
@@ -615,6 +641,7 @@ const bindRuntime = () => {
 
   const runtime = getRuntime();
   if (!runtime?.EnergyMeterService || !runtime?.WallboxService || !runtime?.BatteryService || !runtime?.EspService) {
+    if (!isSimulation.value) markRealStateWaiting();
     return;
   }
 
@@ -624,7 +651,9 @@ const bindRuntime = () => {
   runtime.WallboxService.on('data', onWallbox);
   runtime.BatteryService.on('data', onBattery);
   runtime.EspService?.on?.('branchA', onBranchAStatus);
+  runtime.EspService?.on?.('branchA_ack', onBranchAAck);
   runtime.EspService?.on?.('branchB', onBranchBStatus);
+  runtime.EspService?.on?.('branchB_ack', onBranchBAck);
   runtime.BranchBService?.on?.('branchB', onBranchBStatus);
 
   if (runtime === SimulationRuntime) {
@@ -680,8 +709,9 @@ const init = () => {
   bindRuntime();
 
   unwatchRuntimeMode = watch(
-    () => App._.mode,
-    () => bindRuntime()
+    () => [App._.mode, App._.servicesReady],
+    () => bindRuntime(),
+    { deep: true }
   );
 
   animationFrame = requestAnimationFrame(animate);
@@ -815,6 +845,7 @@ onUnmounted(() => {
         :predict-vuf="predictVufForDeviceState"
         :control-ready="controlReady"
         :control-blocked-reason="controlBlockedReason"
+        :command-feedback="commandFeedback"
         @apply-state="applyAgentDeviceState"
         @heatpump-zero-hold="requestHeatpumpZeroHold"
         @enabled-change="onAgentEnabledChange"

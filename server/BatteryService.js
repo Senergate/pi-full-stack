@@ -13,8 +13,8 @@ const normalizeSwitchStatus = payload => ({
 const BatteryService = {
   name: 'BatteryService',
 
-  // Physical Branch-C command: true = charger ON, false = charger OFF.
-  // Discharge remains Digital-Twin-only in the current prototype.
+  // Senergate decision: true = battery charging ON, false = charger OFF.
+  // Do not encode discharge with this boolean; use a future charge/discharge/idle enum.
   set: charging => {
     const bus = BatteryService.server.services.get('MqttService').bus;
     const output = charging === true;
@@ -39,7 +39,7 @@ const BatteryService = {
       if (!topic.startsWith('shelly-battery/status/switch:')) return;
       try {
         const payload = normalizeSwitchStatus(JSON.parse(message.toString()));
-        server.io.emit('BatteryService', 'data', payload);
+        server.emitServiceEvent('BatteryService', 'data', payload);
       } catch (err) {
         console.error(`Invalid MQTT payload on ${topic}:`, err);
       }

@@ -15,7 +15,7 @@ const EnergyMeterService = {
       if (topic !== 'shellypro3em-ece334e62cdc/status/em:0') return;
       try {
         const payload = JSON.parse(message.toString());
-        server.io.emit('EnergyMeterService', 'data', payload);
+        server.emitServiceEvent('EnergyMeterService', 'data', payload);
       } catch {
         console.log(message.toString());
       }

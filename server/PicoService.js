@@ -15,7 +15,7 @@ const PicoService = {
       if(topic!=='pico/data') return;
       try {
         const payload = JSON.parse(message.toString());
-        server.io.emit('PicoService', 'data', payload);
+        server.emitServiceEvent('PicoService', 'data', payload);
       } catch {
         console.log(message.toString());
       }
