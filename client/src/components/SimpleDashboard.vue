@@ -63,10 +63,9 @@ const CURRENT_PROJECTION_FACTOR = { a: 800, b: 400, c: 230 };
 
 const _ = reactive({
   count: 0,
-  // level is the UI/Agent level 0..5. null means: real hardware state not known yet.
   heatpump: { level: 0, commanded: null },
-  wallbox: { load: null, r0: null, r1: null },
-  battery: { charging: null },
+  wallbox: { load: 0, r0: false, r1: false },
+  battery: { charging: false },
   energy_meter: {
     timedelta: null,
     lastUpdate: null,
@@ -122,9 +121,11 @@ const clampInt = (value, min, max) => {
   return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : min;
 };
 
+const own = (object, key) => Object.prototype.hasOwnProperty.call(object ?? {}, key);
+
 const boolOrNull = value => {
-  if (value === true || value === 'true' || value === '1' || value === 1 || value === 'on' || value === 'ON') return true;
-  if (value === false || value === 'false' || value === '0' || value === 0 || value === 'off' || value === 'OFF') return false;
+  if (value === true || value === 1 || value === '1' || value === 'true' || value === 'on' || value === 'ON') return true;
+  if (value === false || value === 0 || value === '0' || value === 'false' || value === 'off' || value === 'OFF') return false;
   return null;
 };
 
@@ -146,34 +147,14 @@ const frequencyHzToLevel = hz => {
 
 const levelToHeatpumpCommand = (level, forcedMode = null) => {
   const safeLevel = clampInt(level, 0, HEATPUMP_LEVELS);
-
-  if (forcedMode === 'zero_hold') {
-    return { mode: 'zero_hold', level: 0, target_hz: 0 };
-  }
-
-  if (forcedMode === 'stop' || safeLevel === 0) {
-    return { mode: 'stop', level: 0, target_hz: 0 };
-  }
-
-  return {
-    mode: 'start',
-    level: safeLevel,
-    target_hz: levelToTargetHz(safeLevel),
-  };
+  if (forcedMode === 'zero_hold') return { mode: 'zero_hold', level: 0, target_hz: 0 };
+  if (forcedMode === 'stop' || safeLevel === 0) return { mode: 'stop', level: 0, target_hz: 0 };
+  return { mode: 'start', level: safeLevel, target_hz: levelToTargetHz(safeLevel) };
 };
 
 const sendHeatpumpCommand = command => {
-  const runtime = getRuntime();
   _.heatpump.commanded = { ...command, ts: Date.now() };
-  return runtime.EspService.heatpump(command);
-};
-
-const markRealStateWaiting = () => {
-  _.heatpump.level = null;
-  _.wallbox.load = null;
-  _.wallbox.r0 = null;
-  _.wallbox.r1 = null;
-  _.battery.charging = null;
+  return getRuntime().EspService.heatpump(command);
 };
 
 const selectScenario = key => {
@@ -191,6 +172,14 @@ const finiteNonNegative = value => {
 const formatNullableNumber = (value, digits = 3, suffix = '') => {
   const n = numberOrNull(value);
   return n === null ? '--' : `${n.toFixed(digits)}${suffix}`;
+};
+
+const markRealStateWaiting = () => {
+  _.heatpump.level = null;
+  _.wallbox.load = null;
+  _.wallbox.r0 = null;
+  _.wallbox.r1 = null;
+  _.battery.charging = null;
 };
 
 const setGridPreset = key => {
@@ -293,6 +282,28 @@ const vufResult = computed(() =>
 
 const currentVuf = computed(() => numberOrNull(vufResult.value?.vufPercent));
 
+const baselineVufResult = computed(() =>
+  PhasorCalculator.analyzeVUF({
+    currents: { a: 0, b: 0, c: 0 },
+    powerFactors: measuredPowerFactors.value,
+    sourceVoltages: twinVoltages.value,
+    sourceAngles: _.vuf.sourceAngle,
+    resistance: phaseResistance.value,
+    reactance: phaseReactance.value,
+    neutralResistance: finiteNonNegative(_.grid.rNeutral),
+    neutralReactance: finiteNonNegative(_.grid.xNeutral),
+  })
+);
+
+const baselineVuf = computed(() => numberOrNull(baselineVufResult.value?.vufPercent));
+
+const loadImpactVuf = computed(() => {
+  const total = currentVuf.value;
+  const baseline = baselineVuf.value;
+  if (total === null || baseline === null) return null;
+  return Math.max(0, total - baseline);
+});
+
 const loadVoltagesForPhasor = computed(() => {
   const values = vufResult.value?.loadVoltageMagnitudes;
   if (!values) return twinVoltages.value;
@@ -318,7 +329,6 @@ const branchAReady = computed(() => {
 });
 
 const controlReady = computed(() => measurementFresh.value && branchAReady.value);
-
 const controlBlockedReason = computed(() => {
   if (!measurementFresh.value) return 'Measurement data stale or unavailable';
   if (!branchAReady.value) return 'Waiting for Branch-A status or Branch-A is not ready';
@@ -333,14 +343,11 @@ const neutralVoltageDropMagnitude = computed(() => {
 
 const heatpumpLevel = computed(() => {
   const level = numberOrNull(_.heatpump.level);
-  if (level === null) return null;
-  return clampInt(level, 0, HEATPUMP_LEVELS);
+  return level === null ? null : clampInt(level, 0, HEATPUMP_LEVELS);
 });
 
 const wallboxLevel = computed(() => {
-  if (_.wallbox.r0 === null || _.wallbox.r1 === null) {
-    return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
-  }
+  if (_.wallbox.r0 === null || _.wallbox.r1 === null) return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
   return (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
 });
 
@@ -365,60 +372,23 @@ const heatpumpCurrentForLevel = level =>
 
 const batteryCurrentForState = charging => charging ? BATTERY_CHARGE_CURRENT : 0;
 
-const branchCurrentsForState = state => ({
-  a: heatpumpCurrentForLevel(state?.heatpump ?? 0),
-  b: wallboxCurrentForLevel(state?.wallbox ?? 0),
-  c: batteryCurrentForState(state?.batteryCharging === true),
-});
-
-const baselineVufResult = computed(() =>
-  PhasorCalculator.analyzeVUF({
-    currents: { a: 0, b: 0, c: 0 },
-    powerFactors: measuredPowerFactors.value,
-    sourceVoltages: twinVoltages.value,
-    sourceAngles: _.vuf.sourceAngle,
-    resistance: phaseResistance.value,
-    reactance: phaseReactance.value,
-    neutralResistance: finiteNonNegative(_.grid.rNeutral),
-    neutralReactance: finiteNonNegative(_.grid.xNeutral),
-  })
-);
-
-const baselineVuf = computed(() => numberOrNull(baselineVufResult.value?.vufPercent));
-
-const vufImpactFromResult = result => {
-  const total = numberOrNull(result?.vufPercent);
-  const base = baselineVuf.value;
-  if (total === null || base === null) return null;
-  return Math.max(0, total - base);
-};
-
-const branchVufImpact = computed(() => {
-  const state = agentDeviceStates.value;
-  if ([state.heatpump, state.wallbox, state.batteryCharging].some(value => value === null)) return null;
-
-  const result = PhasorCalculator.analyzeVUF({
-    currents: branchCurrentsForState(state),
-    powerFactors: measuredPowerFactors.value,
-    sourceVoltages: twinVoltages.value,
-    sourceAngles: _.vuf.sourceAngle,
-    resistance: phaseResistance.value,
-    reactance: phaseReactance.value,
-    neutralResistance: finiteNonNegative(_.grid.rNeutral),
-    neutralReactance: finiteNonNegative(_.grid.xNeutral),
-  });
-
-  return vufImpactFromResult(result);
-});
-
 const predictVufForDeviceState = candidate => {
+  const currents = { ...projectedCurrents.value };
   const currentState = agentDeviceStates.value;
-  if ([currentState.heatpump, currentState.wallbox, currentState.batteryCharging].some(value => value === null)) {
-    return null;
-  }
+
+  if ([currents.a, currents.b, currents.c].some(value => value === null)) return null;
+  if ([currentState.heatpump, currentState.wallbox, currentState.batteryCharging].some(value => value === null)) return null;
+
+  currents.a += heatpumpCurrentForLevel(candidate.heatpump) - heatpumpCurrentForLevel(currentState.heatpump);
+  currents.b += wallboxCurrentForLevel(candidate.wallbox) - wallboxCurrentForLevel(currentState.wallbox);
+  currents.c += batteryCurrentForState(candidate.batteryCharging) - batteryCurrentForState(currentState.batteryCharging);
+
+  currents.a = Math.max(0, currents.a);
+  currents.b = Math.max(0, currents.b);
+  currents.c = Math.max(0, currents.c);
 
   const result = PhasorCalculator.analyzeVUF({
-    currents: branchCurrentsForState(candidate),
+    currents,
     powerFactors: measuredPowerFactors.value,
     sourceVoltages: twinVoltages.value,
     sourceAngles: _.vuf.sourceAngle,
@@ -428,38 +398,32 @@ const predictVufForDeviceState = candidate => {
     neutralReactance: finiteNonNegative(_.grid.xNeutral),
   });
 
-  return vufImpactFromResult(result);
+  const total = numberOrNull(result?.vufPercent);
+  const baseline = baselineVuf.value;
+  return total === null || baseline === null ? null : Math.max(0, total - baseline);
 };
 
 const applyAgentDeviceState = state => {
   const runtime = getRuntime();
 
-  if (state?.heatpump !== null && state?.heatpump !== undefined) {
+  if (own(state, 'heatpump')) {
     const targetHeatpump = clampInt(state.heatpump, 0, HEATPUMP_LEVELS);
     sendHeatpumpCommand(levelToHeatpumpCommand(targetHeatpump));
   }
 
-  if (state?.wallbox !== null && state?.wallbox !== undefined) {
+  if (own(state, 'wallbox')) {
     const targetWallbox = clampInt(state.wallbox, 0, 3);
     const targetR0 = (targetWallbox & 1) !== 0;
     const targetR1 = (targetWallbox & 2) !== 0;
 
-    if (_.wallbox.r0 !== targetR0) {
-      _.wallbox.r0 = null;
-      runtime.WallboxService.set(0, targetR0);
-    }
-
-    if (_.wallbox.r1 !== targetR1) {
-      _.wallbox.r1 = null;
-      runtime.WallboxService.set(1, targetR1);
-    }
+    _.wallbox.r0 = null;
+    _.wallbox.r1 = null;
+    runtime.WallboxService.set(0, targetR0);
+    runtime.WallboxService.set(1, targetR1);
   }
 
-  if (state?.batteryCharging !== null && state?.batteryCharging !== undefined) {
-    const targetBatteryCharging = state.batteryCharging === true;
-    if (batteryCharging.value !== targetBatteryCharging) {
-      runtime.BatteryService.set(targetBatteryCharging);
-    }
+  if (own(state, 'batteryCharging')) {
+    runtime.BatteryService.set(state.batteryCharging === true);
   }
 };
 
@@ -520,6 +484,7 @@ const onBranchAStatus = payload => {
   _.realFeedback.branchA.lastUpdate = performance.now();
 
   const state = String(payload?.state ?? payload?.drive_state ?? payload?.safety?.state ?? '').toUpperCase();
+  const explicitLevel = firstNumber(payload?.heatpump_level, payload?.level, payload?.vfd?.heatpump_level);
   const frequencyHz = firstNumber(
     payload?.actual_output_frequency_hz,
     payload?.target_frequency_hz,
@@ -529,8 +494,6 @@ const onBranchAStatus = payload => {
     payload?.vfd?.target_frequency_hz
   );
   const rawLfrd = firstNumber(payload?.lfrd_reg8602, payload?.lfrd, payload?.vfd?.lfrd_reg8602);
-
-  const explicitLevel = firstNumber(payload?.heatpump_level, payload?.level, payload?.vfd?.heatpump_level);
 
   if (['STOP', 'STOPPED', 'READY', 'SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
     _.heatpump.level = 0;
@@ -543,12 +506,8 @@ const onBranchAStatus = payload => {
   }
 
   const level = frequencyHzToLevel(frequencyHz ?? (rawLfrd === null ? null : rawLfrd / 10));
-  if (level !== null) {
-    _.heatpump.level = level;
-  }
+  if (level !== null) _.heatpump.level = level;
 };
-
-const own = (object, key) => Object.prototype.hasOwnProperty.call(object ?? {}, key);
 
 const pickBool = (...values) => {
   for (const value of values) {
@@ -564,31 +523,11 @@ const readRelay = (payload, index) => {
   const relayArray = Array.isArray(root.relay) ? root.relay : [];
 
   if (index === 0) {
-    return pickBool(
-      root.r0,
-      root.relay0,
-      root.relay_0,
-      relays.r0,
-      relays.relay0,
-      relays.relay_0,
-      own(root, 'relay1') && own(root, 'relay2') ? root.relay1 : undefined,
-      own(relays, 'relay1') && own(relays, 'relay2') ? relays.relay1 : undefined,
-      relayArray[0]
-    );
+    return pickBool(root.r0, root.relay0, root.relay_0, relays.r0, relays.relay0, relays.relay_0, own(root, 'relay1') && own(root, 'relay2') ? root.relay1 : undefined, relayArray[0]);
   }
 
   if (index === 1) {
-    return pickBool(
-      root.r1,
-      root.relay_1,
-      root.relay2,
-      relays.r1,
-      relays.relay_1,
-      relays.relay2,
-      own(root, 'relay0') ? root.relay1 : undefined,
-      own(relays, 'relay0') ? relays.relay1 : undefined,
-      relayArray[1]
-    );
+    return pickBool(root.r1, root.relay_1, root.relay2, relays.r1, relays.relay_1, relays.relay2, own(root, 'relay0') ? root.relay1 : undefined, relayArray[1]);
   }
 
   return null;
@@ -597,21 +536,17 @@ const readRelay = (payload, index) => {
 const onBranchBStatus = payload => {
   _.realFeedback.branchB.payload = payload;
   _.realFeedback.branchB.lastUpdate = performance.now();
-
   const r0 = readRelay(payload, 0);
   const r1 = readRelay(payload, 1);
-
   if (r0 !== null) _.wallbox.r0 = r0;
   if (r1 !== null) _.wallbox.r1 = r1;
-
-  if (_.wallbox.r0 !== null && _.wallbox.r1 !== null) {
-    _.wallbox.load = (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
-  }
+  if (_.wallbox.r0 !== null && _.wallbox.r1 !== null) _.wallbox.load = (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
 };
 
 const onWallbox = data => {
-  if (data.id === 0) _.wallbox.r0 = data.output;
-  else if (data.id === 1) _.wallbox.r1 = data.output;
+  const output = boolOrNull(data?.output);
+  if (data.id === 0 && output !== null) _.wallbox.r0 = output;
+  else if (data.id === 1 && output !== null) _.wallbox.r1 = output;
 
   if (_.wallbox.r0 !== null && _.wallbox.r1 !== null) {
     _.wallbox.load = (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
@@ -619,8 +554,8 @@ const onWallbox = data => {
 };
 
 const onBattery = data => {
-  // Branch C physical path is charging only: Shelly output ON means charger enabled.
-  _.battery.charging = data.output === true;
+  const output = boolOrNull(data?.output);
+  if (output !== null) _.battery.charging = output;
 };
 
 const toggleWallbox = r => {
@@ -639,8 +574,7 @@ const toggleWallbox = r => {
 };
 
 const updateHeatpumpLoad = value => {
-  const level = clampInt(value, 0, HEATPUMP_LEVELS);
-  sendHeatpumpCommand(levelToHeatpumpCommand(level));
+  sendHeatpumpCommand(levelToHeatpumpCommand(clampInt(value, 0, HEATPUMP_LEVELS)));
 };
 
 const requestHeatpumpZeroHold = () => {
@@ -667,6 +601,7 @@ const unbindRuntime = () => {
   boundRuntime.BatteryService?.off?.('data', onBattery);
   boundRuntime.EspService?.off?.('branchA', onBranchAStatus);
   boundRuntime.EspService?.off?.('branchB', onBranchBStatus);
+  boundRuntime.BranchBService?.off?.('branchB', onBranchBStatus);
 
   if (boundRuntime === SimulationRuntime) {
     SimulationRuntime.stop();
@@ -690,13 +625,11 @@ const bindRuntime = () => {
   runtime.BatteryService.on('data', onBattery);
   runtime.EspService?.on?.('branchA', onBranchAStatus);
   runtime.EspService?.on?.('branchB', onBranchBStatus);
+  runtime.BranchBService?.on?.('branchB', onBranchBStatus);
 
   if (runtime === SimulationRuntime) {
     SimulationRuntime.start();
   } else {
-    // Important bug fix: after SIMULATION -> REAL HARDWARE, do not keep/reset
-    // local simulation values as if they were real execution truth. Wait until
-    // ESP32/Shelly status messages repopulate the real device state.
     markRealStateWaiting();
   }
 
@@ -872,21 +805,19 @@ onUnmounted(() => {
         :angles="_.vuf.sourceAngle"
       />
 
-      <VufCard :vuf="currentVuf" :baseline-vuf="baselineVuf" :controllable-vuf="branchVufImpact" />
+      <VufCard :vuf="currentVuf" :baseline-vuf="baselineVuf" :load-impact-vuf="loadImpactVuf" />
     </div>
 
     <div class="agent-section">
       <AgentCard
-        :vuf="branchVufImpact"
+        :vuf="loadImpactVuf"
         :device-states="agentDeviceStates"
         :predict-vuf="predictVufForDeviceState"
-        :control-vuf="branchVufImpact"
-        :baseline-vuf="baselineVuf"
         :control-ready="controlReady"
         :control-blocked-reason="controlBlockedReason"
         @apply-state="applyAgentDeviceState"
-        @enabled-change="onAgentEnabledChange"
         @heatpump-zero-hold="requestHeatpumpZeroHold"
+        @enabled-change="onAgentEnabledChange"
       />
     </div>
 

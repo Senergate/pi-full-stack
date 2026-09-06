@@ -30,9 +30,13 @@ const PhasorCalculator = {
 
   // Build current phasors from measured RMS currents and PF values.
   //
-  // The current angle must be relative to the voltage angle of the same phase.
-  // This is important when sourceAngles intentionally model non-ideal values
-  // such as -120.2° / +119.8°.
+  // Voltage reference angles:
+  // L1 =   0 deg
+  // L2 = -120 deg
+  // L3 = +120 deg
+  //
+  // For an inductive load:
+  // I_angle = V_angle - acos(PF)
   buildCurrentPhasorsFromPF: (
     currents,
     powerFactors = { a: 1, b: 1, c: 1 },

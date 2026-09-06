@@ -1,9 +1,7 @@
 /*
  * Senergate local Digital-Twin runtime
  * ------------------------------------
- * This module deliberately has NO dependency on App.js, Socket.IO, MQTT or
- * any server-side service. In SIMULATION mode every actuator command ends
- * here and only updates local model state.
+ * No Socket.IO, no MQTT, no real actuator side effects.
  */
 
 const CURRENT_ZERO_OFFSET_A = { a: 0.24, b: 0.19, c: 0.13 };
@@ -18,7 +16,6 @@ const BATTERY_CHARGE_CURRENT_A = 20;
 
 const createEmitter = () => {
   const listeners = new Map();
-
   return {
     on(event, listener) {
       if (!listeners.has(event)) listeners.set(event, new Set());
@@ -37,17 +34,8 @@ const energyEmitter = createEmitter();
 const wallboxEmitter = createEmitter();
 const batteryEmitter = createEmitter();
 const branchAEmitter = createEmitter();
+const branchBEmitter = createEmitter();
 
-/*
- * Scenario values are BUILDING-SCALE projected base currents.
- * They are Digital-Twin parameters, not measured building currents.
- *
- * ai_vuf_over_2 is intentionally fixed and reproducible. With the dashboard's
- * "Typical feeder / MODELED" grid preset it starts at roughly 2.2...2.4 %
- * Estimated VUF, depending on the current source-voltage/PF assumptions.
- * The preset also starts controllable devices in a state that lets the agent
- * demonstrate the complete reduction -> compensation closed loop.
- */
 const scenarios = {
   balanced: {
     baseProjectedA: { a: 35, b: 35, c: 35 },
@@ -62,7 +50,6 @@ const scenarios = {
     devices: { heatpumpLevel: 0, wallbox: { r0: false, r1: false }, batteryCharging: false },
   },
   ai_vuf_over_2: {
-    // Base + devices => L1/L2/L3 = 295/100/100 A at scenario start.
     baseProjectedA: { a: 260, b: 84, c: 100 },
     devices: { heatpumpLevel: 5, wallbox: { r0: true, r1: false }, batteryCharging: false },
   },
@@ -79,37 +66,18 @@ const state = {
   batteryCharging: false,
 };
 
-const clampInt = (value, min, max) => {
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : min;
-};
-
-const projectedCurrents = () => ({
-  a:
-    state.baseProjectedA.a +
-    state.heatpumpLevel * (HEATPUMP_MAX_CURRENT_A / HEATPUMP_LEVELS),
-  b:
-    state.baseProjectedA.b +
-    (state.wallbox.r0 ? WALLBOX_R0_CURRENT_A : 0) +
-    (state.wallbox.r1 ? WALLBOX_R1_CURRENT_A : 0),
-  c:
-    state.baseProjectedA.c +
-    (state.batteryCharging ? BATTERY_CHARGE_CURRENT_A : 0),
-});
-
 const finiteNumber = value => {
   if (value === null || value === undefined || value === '') return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
+const clampInt = (value, min, max) => {
+  const n = finiteNumber(value);
+  return n === null ? min : Math.max(min, Math.min(max, Math.round(n)));
 };
 
 const levelToHz = level => HEATPUMP_LEVEL_TO_HZ[clampInt(level, 0, HEATPUMP_LEVELS)] ?? 0;
-
-const hzToLevel = hz => {
-  const parsed = finiteNumber(hz);
-  if (parsed === null || parsed <= 2) return 0;
-  return clampInt(Math.round(parsed / 10), 1, HEATPUMP_LEVELS);
-};
 
 const normalizeHeatpumpCommand = command => {
   if (command === null || command === undefined || typeof command !== 'object' || Array.isArray(command)) {
@@ -132,18 +100,11 @@ const normalizeHeatpumpCommand = command => {
   return { accepted: false, reason: 'invalid_heatpump_mode', simulation: true };
 };
 
-const heatpumpStatusPayload = () => {
-  const targetHz = levelToHz(state.heatpumpLevel);
-  return {
-    simulation: true,
-    state: state.heatpumpLevel > 0 ? 'RUNNING' : 'STOP',
-    heatpump_level: state.heatpumpLevel,
-    target_frequency_hz: targetHz,
-    actual_output_frequency_hz: targetHz,
-  };
-};
-
-const emitHeatpumpStatus = () => branchAEmitter.emit('branchA', heatpumpStatusPayload());
+const projectedCurrents = () => ({
+  a: state.baseProjectedA.a + state.heatpumpLevel * (HEATPUMP_MAX_CURRENT_A / HEATPUMP_LEVELS),
+  b: state.baseProjectedA.b + (state.wallbox.r0 ? WALLBOX_R0_CURRENT_A : 0) + (state.wallbox.r1 ? WALLBOX_R1_CURRENT_A : 0),
+  c: state.baseProjectedA.c + (state.batteryCharging ? BATTERY_CHARGE_CURRENT_A : 0),
+});
 
 const rawEnergyPayload = () => {
   const projected = projectedCurrents();
@@ -153,13 +114,8 @@ const rawEnergyPayload = () => {
     c: projected.c / CURRENT_PROJECTION_FACTOR.c,
   };
 
-  const currentFor = phase =>
-    state.phaseAvailable[phase]
-      ? measured[phase] + CURRENT_ZERO_OFFSET_A[phase]
-      : null;
-
-  const availableValue = (phase, value) =>
-    state.phaseAvailable[phase] ? value : null;
+  const currentFor = phase => state.phaseAvailable[phase] ? measured[phase] + CURRENT_ZERO_OFFSET_A[phase] : null;
+  const availableValue = (phase, value) => state.phaseAvailable[phase] ? value : null;
 
   return {
     source_type: 'simulated_sensor',
@@ -178,13 +134,32 @@ const rawEnergyPayload = () => {
   };
 };
 
+const heatpumpStatusPayload = () => {
+  const hz = levelToHz(state.heatpumpLevel);
+  return {
+    simulation: true,
+    state: state.heatpumpLevel > 0 ? 'RUNNING' : 'STOP',
+    heatpump_level: state.heatpumpLevel,
+    target_frequency_hz: hz,
+    actual_output_frequency_hz: hz,
+  };
+};
+
 const emitEnergy = () => energyEmitter.emit('data', rawEnergyPayload());
+const emitHeatpumpStatus = () => branchAEmitter.emit('branchA', heatpumpStatusPayload());
+const emitBranchBStatus = () => branchBEmitter.emit('branchB', {
+  simulation: true,
+  state: 'ACTIVE',
+  relay0: state.wallbox.r0,
+  relay1: state.wallbox.r1,
+});
 
 const emitDeviceState = () => {
   wallboxEmitter.emit('data', { id: 0, output: state.wallbox.r0, simulation: true });
   wallboxEmitter.emit('data', { id: 1, output: state.wallbox.r1, simulation: true });
-  batteryEmitter.emit('data', { output: state.batteryCharging, simulation: true });
+  batteryEmitter.emit('data', { id: 0, output: state.batteryCharging, simulation: true });
   emitHeatpumpStatus();
+  emitBranchBStatus();
 };
 
 const emitAll = () => {
@@ -193,8 +168,6 @@ const emitAll = () => {
 };
 
 const scheduleClosedLoopUpdate = () => {
-  // A small local delay makes the software twin behave more like a physical
-  // command -> plant -> measurement loop without contacting any real device.
   setTimeout(() => {
     if (state.running) emitEnergy();
   }, 150);
@@ -215,11 +188,7 @@ const applyScenario = name => {
 };
 
 const SimulationRuntime = {
-  EnergyMeterService: {
-    on: energyEmitter.on,
-    off: energyEmitter.off,
-    requestUpdate: emitEnergy,
-  },
+  EnergyMeterService: { on: energyEmitter.on, off: energyEmitter.off, requestUpdate: emitEnergy },
 
   WallboxService: {
     on: wallboxEmitter.on,
@@ -230,10 +199,10 @@ const SimulationRuntime = {
       if (id === 0) state.wallbox.r0 = next;
       else if (id === 1) state.wallbox.r1 = next;
       else return { accepted: false, reason: 'invalid_relay_id', simulation: true };
-
       wallboxEmitter.emit('data', { id, output: next, simulation: true });
+      emitBranchBStatus();
       scheduleClosedLoopUpdate();
-      return { accepted: true, simulation: true };
+      return { accepted: true, id, state: next, simulation: true };
     },
   },
 
@@ -243,7 +212,7 @@ const SimulationRuntime = {
     requestUpdate: emitDeviceState,
     set(charging) {
       state.batteryCharging = charging === true;
-      batteryEmitter.emit('data', { output: state.batteryCharging, simulation: true });
+      batteryEmitter.emit('data', { id: 0, output: state.batteryCharging, simulation: true });
       scheduleClosedLoopUpdate();
       return { accepted: true, charging: state.batteryCharging, simulation: true };
     },
@@ -252,36 +221,27 @@ const SimulationRuntime = {
   EspService: {
     on: branchAEmitter.on,
     off: branchAEmitter.off,
-
     heatpump(command) {
       const normalized = normalizeHeatpumpCommand(command);
       if (!normalized.accepted) return normalized;
-
-      if (normalized.mode === 'start') {
-        state.heatpumpLevel = normalized.level ?? hzToLevel(normalized.target_hz);
-      } else {
-        state.heatpumpLevel = 0;
-      }
-
+      state.heatpumpLevel = normalized.mode === 'start' ? normalized.level : 0;
       emitHeatpumpStatus();
       scheduleClosedLoopUpdate();
-      return {
-        ...normalized,
-        heatpumpLevel: state.heatpumpLevel,
-      };
+      return { ...normalized, heatpumpLevel: state.heatpumpLevel };
     },
-
     requestUpdate() {
-      emitAll();
+      emitHeatpumpStatus();
       return { accepted: true, simulation: true };
     },
   },
 
+  BranchBService: {
+    on: branchBEmitter.on,
+    off: branchBEmitter.off,
+  },
+
   start() {
-    if (state.running) {
-      emitAll();
-      return;
-    }
+    if (state.running) { emitAll(); return; }
     state.running = true;
     emitAll();
     state.timer = setInterval(emitEnergy, 1000);
@@ -293,9 +253,7 @@ const SimulationRuntime = {
     state.timer = null;
   },
 
-  setScenario(name) {
-    return applyScenario(name);
-  },
+  setScenario: applyScenario,
 
   dropPhase(phase) {
     if (!Object.hasOwn(state.phaseAvailable, phase)) return false;
@@ -311,9 +269,7 @@ const SimulationRuntime = {
     return true;
   },
 
-  reset() {
-    applyScenario('l1_overload');
-  },
+  reset() { applyScenario('l1_overload'); },
 
   getSnapshot() {
     return JSON.parse(JSON.stringify({

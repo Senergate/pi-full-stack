@@ -23,7 +23,7 @@
     <div class="vuf-breakdown">
       <span>Total estimated: {{ formatPercent(safeVuf) }}</span>
       <span>Baseline grid: {{ formattedBaseline }}</span>
-      <span>Controllable impact: {{ formattedControllable }}</span>
+      <span>Load/current impact: {{ formattedLoadImpact }}</span>
     </div>
 
     <div class="history">
@@ -53,7 +53,7 @@ const props = defineProps({
     required: false,
     default: null,
   },
-  controllableVuf: {
+  loadImpactVuf: {
     type: Number,
     required: false,
     default: null,
@@ -99,7 +99,7 @@ const formattedVuf = computed(() =>
 );
 
 const formattedBaseline = computed(() => formatPercent(props.baselineVuf));
-const formattedControllable = computed(() => formatPercent(props.controllableVuf));
+const formattedLoadImpact = computed(() => formatPercent(props.loadImpactVuf));
 
 const statusLabel = computed(() => {
   if (safeVuf.value === null) return 'NO DATA';
