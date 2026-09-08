@@ -18,7 +18,7 @@
       <div class="gauge-fill" :style="{ width: gaugeWidth }" />
     </div>
 
-    <div class="reference">Engineering reference: EN 50160 VUF ≤ 2% · demo status only</div>
+    <div class="reference">Engineering reference: EN 50160 VUF ≤ 2.00% · demo status only</div>
 
     <div class="vuf-breakdown">
       <span>Total estimated: {{ formatPercent(safeVuf) }}</span>
@@ -29,7 +29,7 @@
     <div class="history">
       <div class="history-header">
         <span>VUF · last 10 seconds</span>
-        <span class="history-range">0–2.5%</span>
+        <span class="history-range">0.00–2.50%</span>
       </div>
 
       <div ref="graphContainer" class="graph-container">
@@ -95,7 +95,7 @@ const formatPercent = value => {
 };
 
 const formattedVuf = computed(() =>
-  safeVuf.value === null ? '--' : `${safeVuf.value.toFixed(1)}%`
+  safeVuf.value === null ? '--' : `${safeVuf.value.toFixed(2)}%`
 );
 
 const formattedBaseline = computed(() => formatPercent(props.baselineVuf));
@@ -182,7 +182,7 @@ const drawGrid = (ctx, mapX, mapY, padding, width, height, now) => {
 
     ctx.fillStyle = '#789aac';
 
-    ctx.fillText(`${value.toFixed(1)}%`, padding.left - 7, y);
+    ctx.fillText(`${value.toFixed(2)}%`, padding.left - 7, y);
   }
 
   const timeMarks = [10, 5, 0];

@@ -412,9 +412,9 @@ const predictVufForDeviceState = candidate => {
     neutralReactance: finiteNonNegative(_.grid.xNeutral),
   });
 
-  const total = numberOrNull(result?.vufPercent);
-  const baseline = baselineVuf.value;
-  return total === null || baseline === null ? null : Math.max(0, total - baseline);
+  // P0-1: Agent prediction must use the same KPI as the visible VUF status.
+  // loadImpactVuf remains a diagnostic/model-scenario breakdown only.
+  return numberOrNull(result?.vufPercent);
 };
 
 const applyAgentDeviceState = state => {
@@ -840,7 +840,7 @@ onUnmounted(() => {
 
     <div class="agent-section">
       <AgentCard
-        :vuf="loadImpactVuf"
+        :vuf="currentVuf"
         :device-states="agentDeviceStates"
         :predict-vuf="predictVufForDeviceState"
         :control-ready="controlReady"

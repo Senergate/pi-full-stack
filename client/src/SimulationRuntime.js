@@ -10,6 +10,7 @@ const CURRENT_PROJECTION_FACTOR = { a: 800, b: 400, c: 230 };
 const HEATPUMP_MAX_CURRENT_A = 35;
 const HEATPUMP_LEVELS = 5;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
+const HEATPUMP_LEVEL_TARGET_TOLERANCE_HZ = 0.05;
 const WALLBOX_R0_CURRENT_A = 16;
 const WALLBOX_R1_CURRENT_A = 16;
 const BATTERY_CHARGE_CURRENT_A = 20;
@@ -79,22 +80,49 @@ const clampInt = (value, min, max) => {
 
 const levelToHz = level => HEATPUMP_LEVEL_TO_HZ[clampInt(level, 0, HEATPUMP_LEVELS)] ?? 0;
 
+const strictIntInRange = (value, min, max) => {
+  const n = finiteNumber(value);
+  if (n === null || !Number.isInteger(n) || n < min || n > max) return null;
+  return n;
+};
+
+const own = (object, key) => Object.prototype.hasOwnProperty.call(object ?? {}, key);
+
 const normalizeHeatpumpCommand = command => {
   if (command === null || command === undefined || typeof command !== 'object' || Array.isArray(command)) {
     return { accepted: false, reason: 'legacy_normalized_load_rejected', simulation: true };
   }
 
   const mode = String(command.mode ?? '').toLowerCase();
-  const level = clampInt(command.level, 0, HEATPUMP_LEVELS);
-  const targetHz = finiteNumber(command.target_hz ?? command.targetHz) ?? levelToHz(level);
+  const level = strictIntInRange(command.level, 0, HEATPUMP_LEVELS);
+  const hasTargetHz = own(command, 'target_hz') || own(command, 'targetHz');
+  const suppliedTargetHz = hasTargetHz ? finiteNumber(command.target_hz ?? command.targetHz) : null;
 
   if (mode === 'stop') return { accepted: true, mode, level: 0, target_hz: 0, simulation: true };
   if (mode === 'zero_hold') return { accepted: true, mode, level: 0, target_hz: 0, simulation: true };
 
   if (mode === 'start') {
-    if (level < 1 || level > HEATPUMP_LEVELS) return { accepted: false, reason: 'invalid_heatpump_level', simulation: true };
-    if (!Number.isFinite(targetHz) || targetHz <= 2 || targetHz > 50) return { accepted: false, reason: 'invalid_target_hz', simulation: true };
-    return { accepted: true, mode, level, target_hz: targetHz, simulation: true };
+    if (level === null || level < 1 || level > HEATPUMP_LEVELS) {
+      return { accepted: false, reason: 'invalid_heatpump_level', simulation: true };
+    }
+
+    const expectedTargetHz = HEATPUMP_LEVEL_TO_HZ[level];
+    if (hasTargetHz && suppliedTargetHz === null) {
+      return { accepted: false, reason: 'invalid_target_hz', simulation: true };
+    }
+    if (suppliedTargetHz !== null && (suppliedTargetHz <= 2 || suppliedTargetHz > 50)) {
+      return { accepted: false, reason: 'invalid_target_hz', simulation: true };
+    }
+    if (suppliedTargetHz !== null && Math.abs(suppliedTargetHz - expectedTargetHz) > HEATPUMP_LEVEL_TARGET_TOLERANCE_HZ) {
+      return {
+        accepted: false,
+        reason: 'heatpump_level_target_mismatch',
+        expected_target_hz: expectedTargetHz,
+        simulation: true,
+      };
+    }
+
+    return { accepted: true, mode, level, target_hz: expectedTargetHz, simulation: true };
   }
 
   return { accepted: false, reason: 'invalid_heatpump_mode', simulation: true };

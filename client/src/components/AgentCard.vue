@@ -26,7 +26,7 @@
           <span>{{ formatVuf(vuf) }}</span>
           <span v-if="agentState === 'adjusting' && prediction" class="vuf-prediction">({{ formatVuf(prediction.vuf) }})</span>
         </div>
-        <div class="thresholds">Balanced &lt; 1% · Warning 1–2% · Critical &gt; 2%</div>
+        <div class="thresholds">Balanced &lt; 1.00% · Warning 1.00–2.00% · Critical &gt; 2.00%</div>
       </div>
 
       <div class="panel">
@@ -318,7 +318,7 @@ const agentStateDescription = computed(() => {
   if (!autoEnabled.value) return 'Automatic control is disabled.';
   if (agentState.value === 'blocked') return props.controlBlockedReason || 'Automatic control is blocked by hardware/data gate.';
   if (agentState.value === 'adjusting') return 'A device adjustment was selected. Waiting for the physical system to settle.';
-  return 'Automatic control is monitoring load/current impact VUF.';
+  return 'Automatic control is monitoring total estimated VUF.';
 });
 
 const predictCandidate = async state => {
@@ -393,7 +393,7 @@ const selectAndApplyState = async repeatedViolation => {
 
   evaluating.value = true;
   try {
-    addLog(repeatedViolation ? 'VUF still violated' : 'VUF violation detected', `Load/current impact VUF is ${formatVuf(props.vuf)}.`, 'critical');
+    addLog(repeatedViolation ? 'VUF still violated' : 'VUF violation detected', `Total estimated VUF is ${formatVuf(props.vuf)}.`, 'critical');
     const action = await chooseNextAction();
     if (!autoEnabled.value) return;
     if (!action) {
@@ -447,7 +447,7 @@ const evaluateAgent = async () => {
     if (currentVuf > CRITICAL_VUF) { await selectAndApplyState(true); return; }
     prediction.value = null;
     agentState.value = 'monitoring';
-    addLog('VUF stabilized', `Load/current impact VUF is now ${formatVuf(currentVuf)}.`, 'success');
+    addLog('VUF stabilized', `Total estimated VUF is now ${formatVuf(currentVuf)}.`, 'success');
     return;
   }
 
