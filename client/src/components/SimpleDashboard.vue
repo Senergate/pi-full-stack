@@ -63,7 +63,7 @@ const CURRENT_PROJECTION_FACTOR = { a: 800, b: 400, c: 230 };
 
 const _ = reactive({
   count: 0,
-  heatpump: { level: 0, commanded: null },
+  heatpump: { level: 0, mode: null, commanded: null },
   wallbox: { load: 0, r0: false, r1: false },
   battery: { charging: false },
   energy_meter: {
@@ -147,8 +147,8 @@ const frequencyHzToLevel = hz => {
 
 const levelToHeatpumpCommand = (level, forcedMode = null) => {
   const safeLevel = clampInt(level, 0, HEATPUMP_LEVELS);
-  if (forcedMode === 'zero_hold') return { mode: 'zero_hold', level: 0, target_hz: 0 };
-  if (forcedMode === 'stop' || safeLevel === 0) return { mode: 'stop', level: 0, target_hz: 0 };
+  if (forcedMode === 'stop') return { mode: 'stop', level: 0, target_hz: 0 };
+  if (forcedMode === 'zero_hold' || safeLevel === 0) return { mode: 'zero_hold', level: 0, target_hz: 0 };
   return { mode: 'start', level: safeLevel, target_hz: levelToTargetHz(safeLevel) };
 };
 
@@ -360,6 +360,8 @@ const heatpumpLevel = computed(() => {
   return level === null ? null : clampInt(level, 0, HEATPUMP_LEVELS);
 });
 
+const heatpumpMode = computed(() => _.heatpump.mode);
+
 const wallboxLevel = computed(() => {
   if (_.wallbox.r0 === null || _.wallbox.r1 === null) return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
   return (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
@@ -369,6 +371,7 @@ const batteryCharging = computed(() => (_.battery.charging === null ? null : _.b
 
 const agentDeviceStates = computed(() => ({
   heatpump: heatpumpLevel.value,
+  heatpumpMode: heatpumpMode.value,
   wallbox: wallboxLevel.value,
   batteryCharging: batteryCharging.value,
 }));
@@ -412,9 +415,9 @@ const predictVufForDeviceState = candidate => {
     neutralReactance: finiteNonNegative(_.grid.xNeutral),
   });
 
-  // P0-1: Agent prediction must use the same KPI as the visible VUF status.
-  // loadImpactVuf remains a diagnostic/model-scenario breakdown only.
-  return numberOrNull(result?.vufPercent);
+  const total = numberOrNull(result?.vufPercent);
+  const baseline = baselineVuf.value;
+  return total === null || baseline === null ? null : Math.max(0, total - baseline);
 };
 
 const applyAgentDeviceState = state => {
@@ -422,6 +425,7 @@ const applyAgentDeviceState = state => {
 
   if (own(state, 'heatpump')) {
     const targetHeatpump = clampInt(state.heatpump, 0, HEATPUMP_LEVELS);
+    // P0-3 invariant: an AI/level patch of 0 means ZERO_HOLD (start,0), never STOP.
     sendHeatpumpCommand(levelToHeatpumpCommand(targetHeatpump));
   }
 
@@ -519,18 +523,39 @@ const onBranchAStatus = payload => {
   );
   const rawLfrd = firstNumber(payload?.lfrd_reg8602, payload?.lfrd, payload?.vfd?.lfrd_reg8602);
 
-  if (['STOP', 'STOPPED', 'READY', 'SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
+  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
+    _.heatpump.mode = 'stop';
     _.heatpump.level = 0;
     return;
   }
 
+  if (['STOP', 'STOPPED', 'READY'].includes(state)) {
+    _.heatpump.mode = 'stop';
+    _.heatpump.level = 0;
+    return;
+  }
+
+  if (['ZERO_HOLD', 'RAMPING_TO_ZERO_HOLD'].includes(state)) {
+    _.heatpump.mode = 'zero_hold';
+    _.heatpump.level = 0;
+    return;
+  }
+
+  if (['RUNNING', 'STARTING'].includes(state)) _.heatpump.mode = 'start';
+
   if (explicitLevel !== null) {
     _.heatpump.level = clampInt(explicitLevel, 0, HEATPUMP_LEVELS);
+    if (_.heatpump.level > 0) _.heatpump.mode = 'start';
+    else if (_.heatpump.mode === null) _.heatpump.mode = 'zero_hold';
     return;
   }
 
   const level = frequencyHzToLevel(frequencyHz ?? (rawLfrd === null ? null : rawLfrd / 10));
-  if (level !== null) _.heatpump.level = level;
+  if (level !== null) {
+    _.heatpump.level = level;
+    if (level > 0) _.heatpump.mode = 'start';
+    else if (_.heatpump.mode === null) _.heatpump.mode = 'zero_hold';
+  }
 };
 
 const pickBool = (...values) => {
@@ -599,6 +624,10 @@ const toggleWallbox = r => {
 
 const updateHeatpumpLoad = value => {
   sendHeatpumpCommand(levelToHeatpumpCommand(clampInt(value, 0, HEATPUMP_LEVELS)));
+};
+
+const requestHeatpumpStop = () => {
+  sendHeatpumpCommand(levelToHeatpumpCommand(0, 'stop'));
 };
 
 const requestHeatpumpZeroHold = () => {
@@ -840,13 +869,14 @@ onUnmounted(() => {
 
     <div class="agent-section">
       <AgentCard
-        :vuf="currentVuf"
+        :vuf="loadImpactVuf"
         :device-states="agentDeviceStates"
         :predict-vuf="predictVufForDeviceState"
         :control-ready="controlReady"
         :control-blocked-reason="controlBlockedReason"
         :command-feedback="commandFeedback"
         @apply-state="applyAgentDeviceState"
+        @heatpump-stop="requestHeatpumpStop"
         @heatpump-zero-hold="requestHeatpumpZeroHold"
         @enabled-change="onAgentEnabledChange"
       />

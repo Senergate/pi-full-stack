@@ -26,7 +26,7 @@
           <span>{{ formatVuf(vuf) }}</span>
           <span v-if="agentState === 'adjusting' && prediction" class="vuf-prediction">({{ formatVuf(prediction.vuf) }})</span>
         </div>
-        <div class="thresholds">Balanced &lt; 1.00% · Warning 1.00–2.00% · Critical &gt; 2.00%</div>
+        <div class="thresholds">Critical &gt; 2.00% for 1 s · release &lt; 1.90% · min improvement 0.10 pp</div>
       </div>
 
       <div class="panel">
@@ -72,7 +72,7 @@
         </div>
 
         <div class="device-value">{{ formatDeviceLevel(displayedState.heatpump) }} <small>/ 5</small></div>
-        <small v-if="pendingDevices.heatpump" class="pending-note">pending → {{ pendingTargetState.heatpump }}/5</small>
+        <small v-if="pendingDevices.heatpump" class="pending-note">pending → {{ pendingTargetState.heatpump }}/5<span v-if="pendingHeatpumpMode"> · {{ pendingHeatpumpMode.toUpperCase() }}</span></small>
         <small v-else-if="normalizedDeviceStates.heatpump === null" class="pending-note">waiting for Branch-A status</small>
 
         <div class="segments">
@@ -88,8 +88,8 @@
           />
         </div>
 
-        <button type="button" class="off-button" :class="{ active: displayedState.heatpump === 0 }" :disabled="autoEnabled" @click="setDeviceState('heatpump', 0)">OFF</button>
-        <button type="button" class="off-button zero-hold-button" :disabled="autoEnabled" title="Branch-A ZERO_HOLD: start,0" @click="requestHeatpumpZeroHold">ZERO HOLD</button>
+        <button type="button" class="off-button" :class="{ active: normalizedHeatpumpMode === 'stop' }" :disabled="autoEnabled" title="Branch-A STOP: stop,0" @click="requestHeatpumpStop">STOP</button>
+        <button type="button" class="off-button zero-hold-button" :class="{ active: normalizedHeatpumpMode === 'zero_hold' }" :disabled="autoEnabled" title="Branch-A ZERO_HOLD: start,0" @click="requestHeatpumpZeroHold">ZERO HOLD</button>
       </div>
 
       <div class="device" :class="{ pending: pendingDevices.wallbox, unknown: normalizedDeviceStates.wallbox === null }">
@@ -165,9 +165,11 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 
 const CRITICAL_VUF = 2.0;
-const SETTLE_TIME_MS = 5000;
+const RELEASE_VUF = 1.9;
+const TRIGGER_CONFIRM_MS = 1000;
+const SETTLE_TIME_MS = 10000;
 const TICK_MS = 250;
-const MIN_IMPROVEMENT = 0.01;
+const MIN_IMPROVEMENT = 0.10;
 const MAX_HEATPUMP = 5;
 const MAX_WALLBOX = 3;
 const MIN_LOAD_RATIO = 0.5;
@@ -181,7 +183,7 @@ const props = defineProps({
   commandFeedback: { type: Object, required: false, default: () => ({}) },
 });
 
-const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold']);
+const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold', 'heatpump-stop']);
 
 const autoEnabled = ref(false);
 const agentState = ref('inactive');
@@ -193,9 +195,12 @@ const now = ref(Date.now());
 const evaluating = ref(false);
 const timer = ref(null);
 const logId = ref(0);
+const violationSince = ref(null);
+const regulationActive = ref(false);
 
 const pendingDevices = reactive({ heatpump: false, wallbox: false, batteryCharging: false });
 const pendingTargetState = reactive({ heatpump: null, wallbox: null, batteryCharging: null });
+const pendingHeatpumpMode = ref(null);
 
 const clampInt = (value, min, max) => {
   if (value === null || value === undefined || value === '') return null;
@@ -212,6 +217,14 @@ const normalizedDeviceStates = computed(() => ({
       ? null
       : props.deviceStates.batteryCharging === true,
 }));
+
+const normalizedHeatpumpMode = computed(() => {
+  const raw = String(props.deviceStates?.heatpumpMode ?? '').toLowerCase();
+  if (['start', 'running', 'starting'].includes(raw)) return 'start';
+  if (['zero_hold', 'zero-hold', 'ramping_to_zero_hold'].includes(raw)) return 'zero_hold';
+  if (['stop', 'stopped', 'ready', 'safe_mode', 'fault', 'error'].includes(raw)) return 'stop';
+  return null;
+});
 
 const hasPendingDevice = computed(() => pendingDevices.heatpump || pendingDevices.wallbox || pendingDevices.batteryCharging);
 const hasUnknownDeviceState = computed(() => Object.values(normalizedDeviceStates.value).some(value => value === null));
@@ -261,20 +274,30 @@ const latestFeedbackLines = computed(() => {
   };
 });
 
-const markPending = patch => {
+const markPending = (patch, { heatpumpMode = null } = {}) => {
   const current = normalizedDeviceStates.value;
   for (const key of Object.keys(pendingDevices)) {
     if (!Object.hasOwn(patch, key)) continue;
-    pendingDevices[key] = patch[key] !== current[key];
+
+    const levelChanged = patch[key] !== current[key];
+    const modeChanged = key === 'heatpump' && heatpumpMode !== null && heatpumpMode !== normalizedHeatpumpMode.value;
+    pendingDevices[key] = levelChanged || modeChanged;
     pendingTargetState[key] = pendingDevices[key] ? patch[key] : null;
+
+    if (key === 'heatpump') pendingHeatpumpMode.value = pendingDevices[key] ? heatpumpMode : null;
   }
 };
 
-watch(normalizedDeviceStates, current => {
+watch([normalizedDeviceStates, normalizedHeatpumpMode], ([current, heatpumpMode]) => {
   for (const key of Object.keys(pendingDevices)) {
-    if (pendingDevices[key] && current[key] === pendingTargetState[key]) {
+    if (!pendingDevices[key]) continue;
+
+    const levelMatches = current[key] === pendingTargetState[key];
+    const modeMatches = key !== 'heatpump' || pendingHeatpumpMode.value === null || heatpumpMode === pendingHeatpumpMode.value;
+    if (levelMatches && modeMatches) {
       pendingDevices[key] = false;
       pendingTargetState[key] = null;
+      if (key === 'heatpump') pendingHeatpumpMode.value = null;
     }
   }
 }, { deep: true });
@@ -318,7 +341,9 @@ const agentStateDescription = computed(() => {
   if (!autoEnabled.value) return 'Automatic control is disabled.';
   if (agentState.value === 'blocked') return props.controlBlockedReason || 'Automatic control is blocked by hardware/data gate.';
   if (agentState.value === 'adjusting') return 'A device adjustment was selected. Waiting for the physical system to settle.';
-  return 'Automatic control is monitoring total estimated VUF.';
+  if (violationSince.value !== null) return 'VUF is above the trigger threshold. Waiting for 1 s confirmation before actuation.';
+  if (regulationActive.value) return 'Regulation is active. Hysteresis releases only below 1.90%.';
+  return 'Automatic control is monitoring load/current impact VUF.';
 });
 
 const predictCandidate = async state => {
@@ -368,17 +393,42 @@ const evaluateCandidates = async candidates => {
   return results[0];
 };
 
+const DEVICE_KEYS = Object.freeze(['heatpump', 'wallbox', 'batteryCharging']);
+
+const deviceStateEquals = (left, right) =>
+  DEVICE_KEYS.every(key => Object.is(left?.[key], right?.[key]));
+
+const buildDeltaPatch = (actual, desired) => {
+  const patch = {};
+  for (const key of DEVICE_KEYS) {
+    if (!Object.is(actual?.[key], desired?.[key])) patch[key] = desired[key];
+  }
+  return patch;
+};
+
+const formatDeltaPatch = patch => {
+  const parts = [];
+  if (Object.hasOwn(patch, 'heatpump')) parts.push(`Heat pump → ${patch.heatpump}/5${patch.heatpump === 0 ? ' (ZERO_HOLD)' : ''}`);
+  if (Object.hasOwn(patch, 'wallbox')) parts.push(`Wallbox → ${patch.wallbox}/3`);
+  if (Object.hasOwn(patch, 'batteryCharging')) parts.push(`Battery → ${patch.batteryCharging ? 'ON' : 'OFF'}`);
+  return parts.join(' · ');
+};
+
 const chooseNextAction = async () => {
   if (hasUnknownDeviceState.value) return null;
   const current = { ...normalizedDeviceStates.value };
   const reductions = getReductionCandidates(current);
   if (reductions.length > 0) {
     const bestReduction = await evaluateCandidates(reductions);
-    if (bestReduction && bestReduction.vuf < Number(props.vuf) - MIN_IMPROVEMENT) return { ...bestReduction, reason: 'reduce' };
+    if (bestReduction && bestReduction.vuf < Number(props.vuf) - MIN_IMPROVEMENT) {
+      return { ...bestReduction, reason: 'reduce', baseState: current };
+    }
   }
   if (hasBlockedReduction(current)) {
     const bestCompensation = await evaluateCandidates(getCompensationCandidates(current));
-    if (bestCompensation && bestCompensation.vuf < Number(props.vuf) - MIN_IMPROVEMENT) return { ...bestCompensation, reason: 'compensate' };
+    if (bestCompensation && bestCompensation.vuf < Number(props.vuf) - MIN_IMPROVEMENT) {
+      return { ...bestCompensation, reason: 'compensate', baseState: current };
+    }
   }
   return null;
 };
@@ -393,7 +443,7 @@ const selectAndApplyState = async repeatedViolation => {
 
   evaluating.value = true;
   try {
-    addLog(repeatedViolation ? 'VUF still violated' : 'VUF violation detected', `Total estimated VUF is ${formatVuf(props.vuf)}.`, 'critical');
+    addLog(repeatedViolation ? 'VUF still violated' : 'VUF violation detected', `Load/current impact VUF is ${formatVuf(props.vuf)}.`, 'critical');
     const action = await chooseNextAction();
     if (!autoEnabled.value) return;
     if (!action) {
@@ -403,15 +453,32 @@ const selectAndApplyState = async repeatedViolation => {
       return;
     }
 
+    const latestActual = { ...normalizedDeviceStates.value };
+    if (!deviceStateEquals(latestActual, action.baseState)) {
+      prediction.value = null;
+      agentState.value = 'monitoring';
+      addLog('Actuation skipped', 'Execution state changed while the Digital Twin prediction was running. A fresh evaluation is required.', 'warning');
+      return;
+    }
+
+    const deltaPatch = buildDeltaPatch(action.baseState, action.state);
+    if (Object.keys(deltaPatch).length === 0) {
+      prediction.value = null;
+      agentState.value = 'monitoring';
+      return;
+    }
+
     prediction.value = action;
-    markPending(action.state);
-    emit('apply-state', { ...action.state });
+    markPending(deltaPatch, { heatpumpMode: Object.hasOwn(deltaPatch, 'heatpump') ? (deltaPatch.heatpump === 0 ? 'zero_hold' : 'start') : null });
+    emit('apply-state', deltaPatch);
     addLog(
       action.reason === 'reduce' ? 'Active load reduced' : 'Compensation device activated',
-      [`Heat pump ${action.state.heatpump}/5`, `Wallbox ${action.state.wallbox}/3`, `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`, `Predicted VUF ${formatVuf(action.vuf)}`].join(' · '),
+      [`Delta: ${formatDeltaPatch(deltaPatch)}`, `Predicted VUF ${formatVuf(action.vuf)}`].join(' · '),
       'action'
     );
     agentState.value = 'adjusting';
+    violationSince.value = null;
+    regulationActive.value = true;
     cooldownUntil.value = Date.now() + SETTLE_TIME_MS;
   } finally {
     evaluating.value = false;
@@ -424,18 +491,19 @@ const evaluateAgent = async () => {
   if (!props.controlReady) {
     agentState.value = 'blocked';
     prediction.value = null;
+    violationSince.value = null;
     return;
   }
   // Do not let enabling AI replace a command that is still waiting for
   // execution feedback. The pending target remains visible across the toggle.
   if (hasPendingDevice.value) {
-    agentState.value = 'monitoring';
     prediction.value = null;
     return;
   }
   if (props.vuf === null || props.vuf === undefined || props.vuf === '' || hasUnknownDeviceState.value) {
     agentState.value = 'monitoring';
     prediction.value = null;
+    violationSince.value = null;
     return;
   }
 
@@ -444,15 +512,35 @@ const evaluateAgent = async () => {
 
   if (agentState.value === 'adjusting') {
     if (now.value < cooldownUntil.value) return;
-    if (currentVuf > CRITICAL_VUF) { await selectAndApplyState(true); return; }
     prediction.value = null;
     agentState.value = 'monitoring';
-    addLog('VUF stabilized', `Total estimated VUF is now ${formatVuf(currentVuf)}.`, 'success');
+  }
+
+  if (currentVuf < RELEASE_VUF) {
+    violationSince.value = null;
+    if (regulationActive.value) {
+      regulationActive.value = false;
+      addLog('VUF stabilized', `Load/current impact VUF is ${formatVuf(currentVuf)}, below the ${formatVuf(RELEASE_VUF)} release threshold.`, 'success');
+    }
     return;
   }
 
-  agentState.value = 'monitoring';
-  if (currentVuf > CRITICAL_VUF) await selectAndApplyState(false);
+  if (currentVuf <= CRITICAL_VUF) {
+    violationSince.value = null;
+    return;
+  }
+
+  if (violationSince.value === null) {
+    violationSince.value = now.value;
+    return;
+  }
+
+  if (now.value - violationSince.value < TRIGGER_CONFIRM_MS) return;
+
+  const repeatedViolation = regulationActive.value;
+  regulationActive.value = true;
+  violationSince.value = null;
+  await selectAndApplyState(repeatedViolation);
 };
 
 const toggleAuto = () => {
@@ -460,6 +548,8 @@ const toggleAuto = () => {
   emit('enabled-change', autoEnabled.value);
   prediction.value = null;
   cooldownUntil.value = 0;
+  violationSince.value = null;
+  regulationActive.value = false;
 
   if (autoEnabled.value) {
     agentState.value = 'monitoring';
@@ -505,19 +595,27 @@ const setDeviceState = (device, value) => {
   if (device === 'batteryCharging') patch = { batteryCharging: value === true };
   if (!patch) return;
 
-  markPending(patch);
+  markPending(patch, { heatpumpMode: device === 'heatpump' ? (patch.heatpump === 0 ? 'zero_hold' : 'start') : null });
   emit('apply-state', patch);
 
   const nextState = { ...displayedState.value, ...patch };
   addLog('Manual device state changed', [`Heat pump ${formatDeviceLevel(nextState.heatpump)}/5`, `Wallbox ${formatDeviceLevel(nextState.wallbox)}/3`, `Battery ${formatBinary(nextState.batteryCharging)}`].join(' · '), 'info');
 };
 
+const requestHeatpumpStop = () => {
+  prediction.value = null;
+  const patch = { heatpump: 0 };
+  markPending(patch, { heatpumpMode: 'stop' });
+  emit('heatpump-stop');
+  addLog('Heat pump STOP requested', 'Manual STOP is an explicit Branch-A stop,0 command and is never generated by AI control.', 'info');
+};
+
 const requestHeatpumpZeroHold = () => {
   prediction.value = null;
   const patch = { heatpump: 0 };
-  markPending(patch);
+  markPending(patch, { heatpumpMode: 'zero_hold' });
   emit('heatpump-zero-hold');
-  addLog('Heat pump ZERO_HOLD requested', 'Manual ZERO_HOLD uses Branch-A start,0 and is intentionally different from OFF/STOP.', 'info');
+  addLog('Heat pump ZERO_HOLD requested', 'Manual ZERO_HOLD uses Branch-A start,0 and is intentionally different from STOP.', 'info');
 };
 
 onMounted(() => { timer.value = window.setInterval(evaluateAgent, TICK_MS); });

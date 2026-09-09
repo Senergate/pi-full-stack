@@ -10,7 +10,6 @@ const CURRENT_PROJECTION_FACTOR = { a: 800, b: 400, c: 230 };
 const HEATPUMP_MAX_CURRENT_A = 35;
 const HEATPUMP_LEVELS = 5;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
-const HEATPUMP_LEVEL_TARGET_TOLERANCE_HZ = 0.05;
 const WALLBOX_R0_CURRENT_A = 16;
 const WALLBOX_R1_CURRENT_A = 16;
 const BATTERY_CHARGE_CURRENT_A = 20;
@@ -63,6 +62,7 @@ const state = {
   baseProjectedA: { ...scenarios.l1_overload.baseProjectedA },
   phaseAvailable: { a: true, b: true, c: true },
   heatpumpLevel: 0,
+  heatpumpMode: 'zero_hold',
   wallbox: { r0: false, r1: false },
   batteryCharging: false,
 };
@@ -80,49 +80,22 @@ const clampInt = (value, min, max) => {
 
 const levelToHz = level => HEATPUMP_LEVEL_TO_HZ[clampInt(level, 0, HEATPUMP_LEVELS)] ?? 0;
 
-const strictIntInRange = (value, min, max) => {
-  const n = finiteNumber(value);
-  if (n === null || !Number.isInteger(n) || n < min || n > max) return null;
-  return n;
-};
-
-const own = (object, key) => Object.prototype.hasOwnProperty.call(object ?? {}, key);
-
 const normalizeHeatpumpCommand = command => {
   if (command === null || command === undefined || typeof command !== 'object' || Array.isArray(command)) {
     return { accepted: false, reason: 'legacy_normalized_load_rejected', simulation: true };
   }
 
   const mode = String(command.mode ?? '').toLowerCase();
-  const level = strictIntInRange(command.level, 0, HEATPUMP_LEVELS);
-  const hasTargetHz = own(command, 'target_hz') || own(command, 'targetHz');
-  const suppliedTargetHz = hasTargetHz ? finiteNumber(command.target_hz ?? command.targetHz) : null;
+  const level = clampInt(command.level, 0, HEATPUMP_LEVELS);
+  const targetHz = finiteNumber(command.target_hz ?? command.targetHz) ?? levelToHz(level);
 
   if (mode === 'stop') return { accepted: true, mode, level: 0, target_hz: 0, simulation: true };
   if (mode === 'zero_hold') return { accepted: true, mode, level: 0, target_hz: 0, simulation: true };
 
   if (mode === 'start') {
-    if (level === null || level < 1 || level > HEATPUMP_LEVELS) {
-      return { accepted: false, reason: 'invalid_heatpump_level', simulation: true };
-    }
-
-    const expectedTargetHz = HEATPUMP_LEVEL_TO_HZ[level];
-    if (hasTargetHz && suppliedTargetHz === null) {
-      return { accepted: false, reason: 'invalid_target_hz', simulation: true };
-    }
-    if (suppliedTargetHz !== null && (suppliedTargetHz <= 2 || suppliedTargetHz > 50)) {
-      return { accepted: false, reason: 'invalid_target_hz', simulation: true };
-    }
-    if (suppliedTargetHz !== null && Math.abs(suppliedTargetHz - expectedTargetHz) > HEATPUMP_LEVEL_TARGET_TOLERANCE_HZ) {
-      return {
-        accepted: false,
-        reason: 'heatpump_level_target_mismatch',
-        expected_target_hz: expectedTargetHz,
-        simulation: true,
-      };
-    }
-
-    return { accepted: true, mode, level, target_hz: expectedTargetHz, simulation: true };
+    if (level < 1 || level > HEATPUMP_LEVELS) return { accepted: false, reason: 'invalid_heatpump_level', simulation: true };
+    if (!Number.isFinite(targetHz) || targetHz <= 2 || targetHz > 50) return { accepted: false, reason: 'invalid_target_hz', simulation: true };
+    return { accepted: true, mode, level, target_hz: targetHz, simulation: true };
   }
 
   return { accepted: false, reason: 'invalid_heatpump_mode', simulation: true };
@@ -166,7 +139,8 @@ const heatpumpStatusPayload = () => {
   const hz = levelToHz(state.heatpumpLevel);
   return {
     simulation: true,
-    state: state.heatpumpLevel > 0 ? 'RUNNING' : 'STOP',
+    state: state.heatpumpMode === 'stop' ? 'STOP' : (state.heatpumpLevel > 0 ? 'RUNNING' : 'ZERO_HOLD'),
+    heatpump_mode: state.heatpumpMode,
     heatpump_level: state.heatpumpLevel,
     target_frequency_hz: hz,
     actual_output_frequency_hz: hz,
@@ -209,6 +183,7 @@ const applyScenario = name => {
   state.baseProjectedA = { ...scenario.baseProjectedA };
   state.phaseAvailable = { a: true, b: true, c: true };
   state.heatpumpLevel = scenario.devices.heatpumpLevel;
+  state.heatpumpMode = state.heatpumpLevel > 0 ? 'start' : 'zero_hold';
   state.wallbox = { ...scenario.devices.wallbox };
   state.batteryCharging = scenario.devices.batteryCharging;
   emitAll();
@@ -252,6 +227,7 @@ const SimulationRuntime = {
     heatpump(command) {
       const normalized = normalizeHeatpumpCommand(command);
       if (!normalized.accepted) return normalized;
+      state.heatpumpMode = normalized.mode;
       state.heatpumpLevel = normalized.mode === 'start' ? normalized.level : 0;
       emitHeatpumpStatus();
       scheduleClosedLoopUpdate();
@@ -304,6 +280,7 @@ const SimulationRuntime = {
       scenario: state.scenario,
       phaseAvailable: state.phaseAvailable,
       heatpumpLevel: state.heatpumpLevel,
+      heatpumpMode: state.heatpumpMode,
       wallbox: state.wallbox,
       batteryCharging: state.batteryCharging,
       projectedCurrentsA: projectedCurrents(),
