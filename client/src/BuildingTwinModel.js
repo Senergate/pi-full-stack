@@ -1,7 +1,7 @@
 /*
  * Senergate building-scale Digital Twin mapping
  * ---------------------------------------------
- * The physical prototype uses small loads. This model maps real/simulated
+ * The physical prototype uses small loads. This model maps REAL-HARDWARE
  * actuator states to an explicit building-scale equivalent. Shelly currents
  * remain measurement truth and are never multiplied by per-phase factors.
  */
@@ -9,17 +9,21 @@
 export const BUILDING_TWIN_CONFIG = Object.freeze({
   // Non-controllable building background used by the reproducible demo.
   // It is a MODELED scenario value, not a Shelly measurement.
-  baseCurrentA: Object.freeze({ a: 260, b: 100, c: 100 }),
+  baseCurrentA: Object.freeze({ a: 0, b: 0, c: 0 }),
 
   // Branch A: one ATV12 + motor on the prototype represents three heat pumps.
   branchAEquivalentHeatpumps: 3,
-  branchAAggregateMaxCurrentA: 35,
+  // Demo building-scale aggregate. At level 5, three equivalent heat pumps
+  // contribute 200 A on L1 so the Typical Feeder model can cross 2% VUF.
+  // This is a MODELED demo projection, not a measured motor current.
+  branchAAggregateMaxCurrentA: 200,
   heatpumpLevels: 5,
 
   // Branch B: each physical relay/resistor represents two wallboxes.
   // Two relays therefore represent four wallboxes in total.
   branchBEquivalentWallboxesPerRelay: 2,
-  wallboxCurrentPerDeviceA: 16,
+  // Building-scale demo current per equivalent wallbox. 20 A ≈ 4.6 kVA at 230 V.
+  wallboxCurrentPerDeviceA: 20,
 
   // Existing Branch-C/battery model is kept as an independent controllable load.
   batteryChargeCurrentA: 20,

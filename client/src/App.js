@@ -9,8 +9,7 @@ const App = {
     connected: false,
     servicesReady: false,
     lastError: '',
-    // Safe default: no socket connection and no MQTT actuation until REAL is selected.
-    mode: 'simulation',
+    runtime: 'real_hardware',
     socketUrl: SOCKET_URL,
   }),
 
@@ -23,19 +22,6 @@ const App = {
   },
 
   wait: time => new Promise(resolve => setTimeout(resolve, time)),
-
-  setMode: mode => {
-    if (mode !== 'simulation' && mode !== 'real') return false;
-    App._.mode = mode;
-
-    if (mode === 'real') {
-      App.ensureConnected();
-    } else {
-      App.disconnectRealRuntime();
-    }
-
-    return true;
-  },
 
   ensureConnected: () => {
     if (App.io) return App.io;
@@ -122,14 +108,6 @@ const App = {
 
     App.io = socket;
     return socket;
-  },
-
-  disconnectRealRuntime: () => {
-    if (!App.io) return;
-    App.io.disconnect();
-    App.io = null;
-    App._.connected = false;
-    App._.servicesReady = false;
   },
 };
 
