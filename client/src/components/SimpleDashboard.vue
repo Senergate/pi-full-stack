@@ -12,6 +12,7 @@ import VufCard from './VufCard.vue';
 import CurrentCard from './CurrentCard.vue';
 import PhasorCard from './PhasorCard.vue';
 import AgentCard from './AgentCard.vue';
+import { deriveHeatpumpStatus } from '../HeatpumpStatusAdapter.js';
 
 const sourceScenarios = {
   ideal: {
@@ -71,7 +72,7 @@ const CURRENT_ZERO_OFFSET_A = { a: 0.24, b: 0.19, c: 0.13 };
 
 const _ = reactive({
   count: 0,
-  heatpump: { level: null, commanded: null },
+  heatpump: { level: null, commanded: null, targetHz: null, actualHz: null, executionState: '' },
   wallbox: { load: null, r0: null, r1: null, r0Update: null, r1Update: null },
   battery: { charging: null, lastUpdate: null },
   energy_meter: {
@@ -186,6 +187,9 @@ const formatNullableNumber = (value, digits = 3, suffix = '') => {
 const markRealStateWaiting = () => {
   _.heatpump.level = null;
   _.heatpump.commanded = null;
+  _.heatpump.targetHz = null;
+  _.heatpump.actualHz = null;
+  _.heatpump.executionState = '';
   _.wallbox.load = null;
   _.wallbox.r0 = null;
   _.wallbox.r1 = null;
@@ -574,30 +578,18 @@ const onBranchAStatus = payload => {
   _.realFeedback.branchA.payload = payload;
   _.realFeedback.branchA.lastUpdate = performance.now();
 
-  const state = String(payload?.state ?? payload?.drive_state ?? payload?.safety?.state ?? '').toUpperCase();
-  const explicitLevel = firstNumber(payload?.heatpump_level, payload?.level, payload?.vfd?.heatpump_level);
-  const frequencyHz = firstNumber(
-    payload?.actual_output_frequency_hz,
-    payload?.target_frequency_hz,
-    payload?.target_hz,
-    payload?.frequency_hz,
-    payload?.vfd?.actual_output_frequency_hz,
-    payload?.vfd?.target_frequency_hz
-  );
-  const rawLfrd = firstNumber(payload?.lfrd_reg8602, payload?.lfrd, payload?.vfd?.lfrd_reg8602);
+  const interpreted = deriveHeatpumpStatus(payload);
+  _.heatpump.executionState = interpreted.state;
+  _.heatpump.targetHz = interpreted.targetHz;
+  _.heatpump.actualHz = interpreted.actualHz;
 
-  if (['STOP', 'STOPPED', 'READY', 'SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
-    _.heatpump.level = 0;
-    return;
+  // Building-Twin current follows the Branch-A-confirmed target setpoint.
+  // Example: STARTING with target=40 Hz and actual=0 Hz must already map to
+  // level 4 (28 A equivalent load). RFRD/actual Hz is delayed feedback and must
+  // not mask a valid LFRD/target value.
+  if (interpreted.modelLevel !== null) {
+    _.heatpump.level = interpreted.modelLevel;
   }
-
-  if (explicitLevel !== null) {
-    _.heatpump.level = clampInt(explicitLevel, 0, HEATPUMP_LEVELS);
-    return;
-  }
-
-  const level = frequencyHzToLevel(frequencyHz ?? (rawLfrd === null ? null : rawLfrd / 10));
-  if (level !== null) _.heatpump.level = level;
 };
 
 const pickBool = (...values) => {
