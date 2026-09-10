@@ -1,31 +1,26 @@
 /*
- * Senergate building-scale Digital Twin mapping
- * ---------------------------------------------
- * The physical prototype uses small loads. This model maps REAL-HARDWARE
- * actuator states to an explicit building-scale equivalent. Shelly currents
- * remain measurement truth and are never multiplied by per-phase factors.
+ * Senergate building-scale Digital Twin mapping for REAL HARDWARE.
+ *
+ * Measurement truth stays in the Shelly/Pico layer. This module maps the
+ * confirmed real actuator state to a documented building-scale equivalent:
+ *   Branch A: 1 ATV12 + motor  -> 3 equivalent heat pumps
+ *   Branch B: 1 relay/resistor -> 2 equivalent wallboxes
+ *             2 relays         -> 4 equivalent wallboxes
+ *
+ * The resulting currents are MODELED / ESTIMATED and must never be labelled
+ * as measured PCC current.
  */
 
 export const BUILDING_TWIN_CONFIG = Object.freeze({
-  // Non-controllable building background used by the reproducible demo.
-  // It is a MODELED scenario value, not a Shelly measurement.
-  baseCurrentA: Object.freeze({ a: 0, b: 0, c: 0 }),
+  baseCurrentA: Object.freeze({ a: 240, b: 100, c: 100 }),
 
-  // Branch A: one ATV12 + motor on the prototype represents three heat pumps.
   branchAEquivalentHeatpumps: 3,
-  // Demo building-scale aggregate. At level 5, three equivalent heat pumps
-  // contribute 200 A on L1 so the Typical Feeder model can cross 2% VUF.
-  // This is a MODELED demo projection, not a measured motor current.
-  branchAAggregateMaxCurrentA: 200,
+  branchAAggregateMaxCurrentA: 35,
   heatpumpLevels: 5,
 
-  // Branch B: each physical relay/resistor represents two wallboxes.
-  // Two relays therefore represent four wallboxes in total.
   branchBEquivalentWallboxesPerRelay: 2,
-  // Building-scale demo current per equivalent wallbox. 20 A ≈ 4.6 kVA at 230 V.
-  wallboxCurrentPerDeviceA: 20,
+  wallboxCurrentPerDeviceA: 16,
 
-  // Existing Branch-C/battery model is kept as an independent controllable load.
   batteryChargeCurrentA: 20,
 });
 
@@ -39,11 +34,8 @@ export const wallboxMaskFromRelays = (r0, r1) =>
 
 export const heatpumpProjectedCurrentA = level => {
   const safeLevel = clampInt(level, 0, BUILDING_TWIN_CONFIG.heatpumpLevels);
-  const perDeviceAtFullLoad =
-    BUILDING_TWIN_CONFIG.branchAAggregateMaxCurrentA /
-    BUILDING_TWIN_CONFIG.branchAEquivalentHeatpumps;
   const loadRatio = safeLevel / BUILDING_TWIN_CONFIG.heatpumpLevels;
-  return BUILDING_TWIN_CONFIG.branchAEquivalentHeatpumps * perDeviceAtFullLoad * loadRatio;
+  return BUILDING_TWIN_CONFIG.branchAAggregateMaxCurrentA * loadRatio;
 };
 
 export const wallboxProjectedCurrentA = mask => {

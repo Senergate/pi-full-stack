@@ -6,7 +6,7 @@
         <h2>Senergate AI Agent</h2>
       </div>
 
-      <button type="button" class="control-toggle" :class="{ enabled: autoEnabled }" @click="toggleAuto">
+      <button type="button" class="control-toggle" :class="{ enabled: autoEnabled }" :disabled="!controlReady" @click="toggleAuto">
         <span class="toggle-track"><span class="toggle-knob" /></span>
         <span>
           <strong>{{ autoEnabled ? 'AI CONTROL ON' : 'AI CONTROL OFF' }}</strong>
@@ -82,14 +82,14 @@
             type="button"
             class="level-button"
             :class="{ active: displayedState.heatpump !== null && level <= displayedState.heatpump }"
-            :disabled="autoEnabled"
+            :disabled="manualControlDisabled"
             :title="`Set heat pump to level ${level}`"
             @click="setDeviceState('heatpump', level)"
           />
         </div>
 
-        <button type="button" class="off-button" :class="{ active: displayedState.heatpump === 0 }" :disabled="autoEnabled" @click="setDeviceState('heatpump', 0)">OFF</button>
-        <button type="button" class="off-button zero-hold-button" :disabled="autoEnabled" title="Branch-A ZERO_HOLD: start,0" @click="requestHeatpumpZeroHold">ZERO HOLD</button>
+        <button type="button" class="off-button" :class="{ active: displayedState.heatpump === 0 }" :disabled="manualControlDisabled" @click="setDeviceState('heatpump', 0)">OFF</button>
+        <button type="button" class="off-button zero-hold-button" :disabled="manualControlDisabled" title="Branch-A ZERO_HOLD: start,0" @click="requestHeatpumpZeroHold">ZERO HOLD</button>
       </div>
 
       <div class="device" :class="{ pending: pendingDevices.wallbox, unknown: normalizedDeviceStates.wallbox === null }">
@@ -109,13 +109,13 @@
             type="button"
             class="level-button"
             :class="{ active: displayedState.wallbox !== null && level <= displayedState.wallbox }"
-            :disabled="autoEnabled"
+            :disabled="manualControlDisabled"
             :title="`Set wallbox to level ${level}`"
             @click="setDeviceState('wallbox', level)"
           />
         </div>
 
-        <button type="button" class="off-button" :class="{ active: displayedState.wallbox === 0 }" :disabled="autoEnabled" @click="setDeviceState('wallbox', 0)">OFF</button>
+        <button type="button" class="off-button" :class="{ active: displayedState.wallbox === 0 }" :disabled="manualControlDisabled" @click="setDeviceState('wallbox', 0)">OFF</button>
       </div>
 
       <div class="device" :class="{ pending: pendingDevices.batteryCharging, unknown: normalizedDeviceStates.batteryCharging === null }">
@@ -131,7 +131,7 @@
           type="button"
           class="binary clickable"
           :class="{ on: displayedState.batteryCharging === true }"
-          :disabled="autoEnabled"
+          :disabled="manualControlDisabled"
           @click="setDeviceState('batteryCharging', nextBatteryCommand)"
         >
           {{ formatBinary(displayedState.batteryCharging) }}
@@ -216,6 +216,7 @@ const normalizedDeviceStates = computed(() => ({
 const hasPendingDevice = computed(() => pendingDevices.heatpump || pendingDevices.wallbox || pendingDevices.batteryCharging);
 const hasUnknownDeviceState = computed(() => Object.values(normalizedDeviceStates.value).some(value => value === null));
 const nextBatteryCommand = computed(() => normalizedDeviceStates.value.batteryCharging !== true);
+const manualControlDisabled = computed(() => autoEnabled.value || !props.controlReady);
 
 /*
  * Device segments show either the last ESP32-confirmed state or an outstanding
@@ -336,7 +337,7 @@ const getReductionCandidates = current => {
     if (nextHeatpump / MAX_HEATPUMP >= MIN_LOAD_RATIO) candidates.push({ ...current, heatpump: nextHeatpump });
   }
 
-  // Wallbox is a 2-bit relay mask, not a linear 0..3 load level.
+  // Wallbox is a 2-bit relay mask, not a linear level.
   if ((current.wallbox & 1) !== 0) candidates.push({ ...current, wallbox: current.wallbox & ~1 });
   if ((current.wallbox & 2) !== 0) candidates.push({ ...current, wallbox: current.wallbox & ~2 });
 
@@ -344,18 +345,11 @@ const getReductionCandidates = current => {
   return candidates;
 };
 
-const hasBlockedReduction = current =>
-  current.heatpump > 0 && (current.heatpump - 1) / MAX_HEATPUMP < MIN_LOAD_RATIO;
-
 const getCompensationCandidates = current => {
   const candidates = [];
   if (current.heatpump === 0) candidates.push({ ...current, heatpump: 1 });
-
-  // Each physical Branch-B relay represents two equivalent wallboxes.
-  // Add only a currently inactive relay so mask 1 can progress to mask 3.
   if ((current.wallbox & 1) === 0) candidates.push({ ...current, wallbox: current.wallbox | 1 });
   if ((current.wallbox & 2) === 0) candidates.push({ ...current, wallbox: current.wallbox | 2 });
-
   if (!current.batteryCharging) candidates.push({ ...current, batteryCharging: true });
   return candidates;
 };
@@ -374,16 +368,27 @@ const evaluateCandidates = async candidates => {
 const chooseNextAction = async () => {
   if (hasUnknownDeviceState.value) return null;
   const current = { ...normalizedDeviceStates.value };
-  const reductions = getReductionCandidates(current);
-  if (reductions.length > 0) {
-    const bestReduction = await evaluateCandidates(reductions);
-    if (bestReduction && bestReduction.vuf < Number(props.vuf) - MIN_IMPROVEMENT) return { ...bestReduction, reason: 'reduce' };
+
+  // Compare every permitted one-step transition in one search space. This
+  // avoids the old reduction-first greedy behaviour and lets Branch B win
+  // when adding an equivalent wallbox improves VUF more than trimming Branch A.
+  const candidates = [
+    ...getReductionCandidates(current),
+    ...getCompensationCandidates(current),
+  ];
+
+  const unique = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = JSON.stringify(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(candidate);
   }
-  if (hasBlockedReduction(current)) {
-    const bestCompensation = await evaluateCandidates(getCompensationCandidates(current));
-    if (bestCompensation && bestCompensation.vuf < Number(props.vuf) - MIN_IMPROVEMENT) return { ...bestCompensation, reason: 'compensate' };
-  }
-  return null;
+
+  const best = await evaluateCandidates(unique);
+  if (!best || best.vuf >= Number(props.vuf) - MIN_IMPROVEMENT) return null;
+  return { ...best, reason: 'optimize' };
 };
 
 const selectAndApplyState = async repeatedViolation => {
@@ -407,10 +412,16 @@ const selectAndApplyState = async repeatedViolation => {
     }
 
     prediction.value = action;
-    markPending(action.state);
-    emit('apply-state', { ...action.state });
+    const current = normalizedDeviceStates.value;
+    const patch = {};
+    for (const key of ['heatpump', 'wallbox', 'batteryCharging']) {
+      if (action.state[key] !== current[key]) patch[key] = action.state[key];
+    }
+    if (Object.keys(patch).length === 0) return;
+    markPending(patch);
+    emit('apply-state', patch);
     addLog(
-      action.reason === 'reduce' ? 'Active load reduced' : 'Compensation device activated',
+      'Best one-step balancing action selected',
       [`Heat pump ${action.state.heatpump}/5`, `Wallbox ${action.state.wallbox}/3`, `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`, `Predicted VUF ${formatVuf(action.vuf)}`].join(' · '),
       'action'
     );
@@ -459,6 +470,7 @@ const evaluateAgent = async () => {
 };
 
 const toggleAuto = () => {
+  if (!props.controlReady) return;
   autoEnabled.value = !autoEnabled.value;
   emit('enabled-change', autoEnabled.value);
   prediction.value = null;
@@ -500,6 +512,7 @@ watch(() => props.controlReady, ready => {
 });
 
 const setDeviceState = (device, value) => {
+  if (!props.controlReady) return;
   prediction.value = null;
   let patch = null;
 
@@ -516,6 +529,7 @@ const setDeviceState = (device, value) => {
 };
 
 const requestHeatpumpZeroHold = () => {
+  if (!props.controlReady) return;
   prediction.value = null;
   const patch = { heatpump: 0 };
   markPending(patch);
@@ -528,5 +542,5 @@ onUnmounted(() => { if (timer.value) window.clearInterval(timer.value); });
 </script>
 
 <style scoped>
-.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.log-dot.critical{background:var(--red)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
+.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.log-dot.critical{background:var(--red)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
 </style>

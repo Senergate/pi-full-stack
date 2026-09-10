@@ -1,15 +1,13 @@
 <script setup>
-import { onMounted } from 'vue';
 import App from './App.js';
 import SimpleDashboard from './components/SimpleDashboard.vue';
+import { onMounted } from 'vue';
 import { useQuasar } from 'quasar';
 
 const $q = useQuasar();
 $q.dark.set(true);
 
-onMounted(() => {
-  App.ensureConnected();
-});
+onMounted(() => App.ensureConnected());
 </script>
 
 <template>

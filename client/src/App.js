@@ -1,7 +1,7 @@
 import { reactive } from 'vue';
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = '10.20.0.200:4000';
+const SOCKET_URL = 'http://10.20.0.200:4000';
 const RPC_TIMEOUT_MS = 3000;
 
 const App = {
@@ -9,7 +9,6 @@ const App = {
     connected: false,
     servicesReady: false,
     lastError: '',
-    runtime: 'real_hardware',
     socketUrl: SOCKET_URL,
   }),
 
@@ -24,7 +23,10 @@ const App = {
   wait: time => new Promise(resolve => setTimeout(resolve, time)),
 
   ensureConnected: () => {
-    if (App.io) return App.io;
+    if (App.io) {
+      if (!App.io.connected) App.io.connect();
+      return App.io;
+    }
 
     App._.lastError = '';
     const socket = io(SOCKET_URL, {
@@ -43,7 +45,6 @@ const App = {
         socket.emit(name, params, response => {
           window.clearTimeout(timer);
 
-          // New server format: { ok: true, data } or { ok:false, error }
           if (response && response.ok === false) {
             reject(new Error(response.error?.message ?? response.error ?? `RPC failed: ${name}`));
             return;
@@ -82,7 +83,6 @@ const App = {
             service[func] = async (...args) => await socket.a_emit(`${name}.${func}`, args);
           }
 
-          // Remove old listener before adding a new one to avoid duplicate events after reconnect.
           socket.off(name);
           socket.on(name, (...args) => App[name]?.trigger(args[0], args.slice(1)));
           App[name] = service;

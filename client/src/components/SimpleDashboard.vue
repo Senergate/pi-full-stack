@@ -26,7 +26,7 @@ const sourceScenarios = {
 };
 
 /*
- * Grid-Impedance presets are explicitly MODELED simulation parameters.
+ * Grid-Impedance presets are explicit BUILDING-TWIN model parameters.
  * They are not measured/calibrated values of the real Senergate site.
  * Version 1 exposes Rphase/Xphase/Rneutral/Xneutral as recommended by the
  * Senergate Grid-Impedance implementation guide.
@@ -63,10 +63,9 @@ const CURRENT_ZERO_OFFSET_A = { a: 0.24, b: 0.19, c: 0.13 };
 
 const _ = reactive({
   count: 0,
-  // Unknown until fresh REAL-HARDWARE feedback confirms the startup OFF sequence.
   heatpump: { level: null, commanded: null },
-  wallbox: { load: null, r0: null, r1: null },
-  battery: { charging: null },
+  wallbox: { load: null, r0: null, r1: null, r0Update: null, r1Update: null },
+  battery: { charging: null, lastUpdate: null },
   energy_meter: {
     timedelta: null,
     lastUpdate: null,
@@ -87,6 +86,14 @@ const _ = reactive({
     provenance: 'modeled',
   },
   agent: { enabled: false },
+  mqtt: { connected: false, lastHeartbeatAt: null },
+  startup: {
+    phase: 'connecting',
+    requestedAt: null,
+    completedAt: null,
+    timeoutAt: null,
+    message: 'Connecting to Pi5…',
+  },
   realFeedback: {
     branchA: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
     branchB: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
@@ -94,12 +101,16 @@ const _ = reactive({
 });
 
 let animationFrame = null;
-let unwatchServicesReady = null;
-let boundRuntime = null;
+let unwatchConnection = null;
+let unwatchStartupChecklist = null;
+let unwatchBranchAState = null;
+let unwatchBranchBState = null;
+let boundRuntime = false;
+let startupTimer = null;
 
 const currentSourceLabel = computed(() => 'BUILDING-SCALE DIGITAL TWIN · REAL execution state');
-
 const currentYRange = computed(() => ({ min: 0, max: 350 }));
+const STARTUP_TIMEOUT_MS = 6000;
 
 const numberOrNull = value => {
   if (value === undefined || value === null || value === '') return null;
@@ -132,7 +143,8 @@ const levelToTargetHz = level => HEATPUMP_LEVEL_TO_HZ[clampInt(level, 0, HEATPUM
 
 const frequencyHzToLevel = hz => {
   const n = numberOrNull(hz);
-  if (n === null || n <= 2) return 0;
+  if (n === null) return null;
+  if (n <= 2) return 0;
   return clampInt(Math.round(n / 10), 1, HEATPUMP_LEVELS);
 };
 
@@ -165,48 +177,18 @@ const formatNullableNumber = (value, digits = 3, suffix = '') => {
   return n === null ? '--' : `${n.toFixed(digits)}${suffix}`;
 };
 
-const setUiDevicesWaiting = () => {
+const markRealStateWaiting = () => {
   _.heatpump.level = null;
   _.heatpump.commanded = null;
   _.wallbox.load = null;
   _.wallbox.r0 = null;
   _.wallbox.r1 = null;
+  _.wallbox.r0Update = null;
+  _.wallbox.r1Update = null;
   _.battery.charging = null;
-};
-
-const markRealStateWaiting = () => {
-  // Do not assume OFF before feedback. The startup sequence commands OFF,
-  // then the UI remains NO DATA/WAITING until fresh device status arrives.
-  setUiDevicesWaiting();
-};
-
-const clearRuntimeData = () => {
-  _.count = 0;
-  setUiDevicesWaiting();
-  _.energy_meter.timedelta = null;
-  _.energy_meter.lastUpdate = null;
-  _.energy_meter.raw = {};
-  _.energy_meter.measured = {};
-  _.energy_meter.projected = {};
+  _.battery.lastUpdate = null;
   _.realFeedback.branchA = { payload: null, ack: null, lastUpdate: null, ackUpdate: null };
   _.realFeedback.branchB = { payload: null, ack: null, lastUpdate: null, ackUpdate: null };
-  _.agent.enabled = false;
-};
-
-const isRealHardwarePayload = payload =>
-  payload?.simulation !== true &&
-  payload?.simulation_mode !== true &&
-  payload?.source_type !== 'simulated_sensor';
-
-const shutdownRealDevices = async () => {
-  const requests = [];
-  if (App.EspService?.heatpump) requests.push(Promise.resolve(App.EspService.heatpump(levelToHeatpumpCommand(0, 'stop'))));
-  if (App.WallboxService?.set) {
-    requests.push(Promise.resolve(App.WallboxService.set(0, false)));
-    requests.push(Promise.resolve(App.WallboxService.set(1, false)));
-  }
-  if (App.BatteryService?.set) requests.push(Promise.resolve(App.BatteryService.set(false)));
-  await Promise.allSettled(requests);
 };
 
 const setGridPreset = key => {
@@ -259,24 +241,15 @@ const measuredCurrents = computed(() => ({
 }));
 
 const projectedCurrents = computed(() => {
-  // First entry must not invent building currents before any REAL measurement
-  // has arrived. Device feedback alone is not sufficient to establish the
-  // current operating point shown on the dashboard.
-  if (_.energy_meter.lastUpdate === null) return { a: null, b: null, c: null };
-
   const heatpumpLevel = numberOrNull(_.heatpump.level);
-  const r0 = _.wallbox.r0;
-  const r1 = _.wallbox.r1;
-  const batteryCharging = _.battery.charging;
-
-  if (heatpumpLevel === null || r0 === null || r1 === null || batteryCharging === null) {
+  if (heatpumpLevel === null || _.wallbox.r0 === null || _.wallbox.r1 === null || _.battery.charging === null) {
     return { a: null, b: null, c: null };
   }
 
   return projectBuildingCurrents({
     heatpumpLevel,
-    wallboxMask: wallboxMaskFromRelays(r0, r1),
-    batteryCharging,
+    wallboxMask: wallboxMaskFromRelays(_.wallbox.r0, _.wallbox.r1),
+    batteryCharging: _.battery.charging,
   });
 });
 
@@ -294,19 +267,11 @@ const measuredVoltages = computed(() => ({
 
 const twinVoltages = computed(() => {
   const measured = measuredVoltages.value;
-
   if ([measured.a, measured.b, measured.c].some(value => value === null)) {
     return { a: null, b: null, c: null };
   }
-
-  if (_.vuf.scenario === 'realistic') {
-    return {
-      a: measured.a + 1.0,
-      b: measured.b - 1.0,
-      c: measured.c + 0.5,
-    };
-  }
-
+  // Keep Shelly voltage magnitudes unchanged. Angles and grid impedance below
+  // are still model assumptions, therefore the resulting VUF is ESTIMATED.
   return { ...measured };
 });
 
@@ -357,31 +322,80 @@ const loadVoltagesForPhasor = computed(() => {
   };
 });
 
-const measurementFresh = computed(() => _.energy_meter.timedelta !== null && _.energy_meter.timedelta < 3);
+const measurementFresh = computed(() =>
+  _.energy_meter.timedelta !== null && _.energy_meter.timedelta < 3
+);
+
+const branchAState = computed(() =>
+  String(_.realFeedback.branchA.payload?.state ?? _.realFeedback.branchA.payload?.drive_state ?? _.realFeedback.branchA.payload?.safety?.state ?? '').toUpperCase()
+);
 
 const branchAReady = computed(() => {
-  const payload = _.realFeedback.branchA.payload;
-  if (!payload) return false;
-  const state = String(payload.state ?? payload.drive_state ?? payload.safety?.state ?? '').toUpperCase();
-  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) return false;
+  const state = branchAState.value;
+  const validStates = ['READY', 'STOP', 'STOPPED', 'ZERO_HOLD', 'STARTING', 'RUNNING', 'RAMPING_TO_ZERO_HOLD'];
+  if (!validStates.includes(state)) return false;
   const last = numberOrNull(_.realFeedback.branchA.lastUpdate);
   return last !== null && performance.now() - last < 3000;
 });
 
+const branchBState = computed(() =>
+  String(_.realFeedback.branchB.payload?.state ?? _.realFeedback.branchB.payload?.safety?.state ?? '').toUpperCase()
+);
+
 const branchBReady = computed(() => {
-  const payload = _.realFeedback.branchB.payload;
-  if (!payload) return false;
-  const state = String(payload.state ?? payload.safety?.state ?? '').toUpperCase();
+  const state = branchBState.value;
   if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) return false;
   const last = numberOrNull(_.realFeedback.branchB.lastUpdate);
-  return last !== null && performance.now() - last < 3000;
+  const statusFresh = last !== null && performance.now() - last < 3000;
+  const relaysKnown = _.wallbox.r0 !== null && _.wallbox.r1 !== null;
+  return statusFresh && relaysKnown;
 });
 
-const controlReady = computed(() => measurementFresh.value && branchAReady.value && branchBReady.value);
+const startupRequestReceived = update => {
+  const requestedAt = numberOrNull(_.startup.requestedAt);
+  const receivedAt = numberOrNull(update);
+  return requestedAt !== null && receivedAt !== null && receivedAt >= requestedAt;
+};
+
+const startupChecklist = computed(() => ({
+  socket: App._.connected === true,
+  services: App._.servicesReady === true,
+  mqtt: _.mqtt.connected === true,
+  measurement: startupRequestReceived(_.energy_meter.lastUpdate),
+  branchA: startupRequestReceived(_.realFeedback.branchA.lastUpdate) && branchAReady.value,
+  branchB: startupRequestReceived(_.realFeedback.branchB.lastUpdate) && branchBReady.value,
+  battery: startupRequestReceived(_.battery.lastUpdate) && _.battery.charging !== null,
+}));
+
+const startupAllReady = computed(() => Object.values(startupChecklist.value).every(Boolean));
+
+const startupActiveDevices = computed(() => {
+  const active = [];
+  if ((heatpumpLevel.value ?? 0) > 0 || ['STARTING', 'RUNNING', 'RAMPING_TO_ZERO_HOLD'].includes(branchAState.value)) active.push('Branch A / Heat pump');
+  if (_.wallbox.r0 === true) active.push('Branch B Relay 0');
+  if (_.wallbox.r1 === true) active.push('Branch B Relay 1');
+  if (_.battery.charging === true) active.push('Battery charging');
+  return active;
+});
+
+const startupStatusLabel = computed(() => {
+  if (_.startup.phase === 'ready') return startupActiveDevices.value.length > 0 ? 'READY · ACTIVE DEVICE DETECTED' : 'READY · SAFE IDLE';
+  if (_.startup.phase === 'timeout') return 'INITIALIZATION TIMEOUT';
+  if (_.startup.phase === 'fault') return 'HARDWARE FAULT / SAFE MODE';
+  if (_.startup.phase === 'requesting') return 'CHECKING INITIAL STATE';
+  if (_.startup.phase === 'services') return 'LOADING SERVICES';
+  return 'CONNECTING';
+});
+
+const controlReady = computed(() =>
+  _.startup.phase === 'ready' && measurementFresh.value && branchAReady.value && branchBReady.value
+);
+
 const controlBlockedReason = computed(() => {
+  if (_.startup.phase !== 'ready') return `Startup initialization not complete: ${startupStatusLabel.value}`;
   if (!measurementFresh.value) return 'Measurement data stale or unavailable';
-  if (!branchAReady.value) return 'Waiting for Branch-A status or Branch-A is not ready';
-  if (!branchBReady.value) return 'Waiting for Branch-B status or Branch-B is not ready';
+  if (!branchAReady.value) return 'Branch-A status stale or Branch-A is not ready';
+  if (!branchBReady.value) return 'Branch-B status stale or relay state is unknown';
   return '';
 });
 
@@ -457,6 +471,9 @@ const predictVufForDeviceState = candidate => {
 };
 
 const applyAgentDeviceState = state => {
+  if (!controlReady.value) return;
+  const runtime = App;
+
   if (own(state, 'heatpump')) {
     const targetHeatpump = clampInt(state.heatpump, 0, HEATPUMP_LEVELS);
     sendHeatpumpCommand(levelToHeatpumpCommand(targetHeatpump));
@@ -469,12 +486,12 @@ const applyAgentDeviceState = state => {
 
     _.wallbox.r0 = null;
     _.wallbox.r1 = null;
-    App.WallboxService.set(0, targetR0);
-    App.WallboxService.set(1, targetR1);
+    runtime.WallboxService.set(0, targetR0);
+    runtime.WallboxService.set(1, targetR1);
   }
 
   if (own(state, 'batteryCharging')) {
-    App.BatteryService.set(state.batteryCharging === true);
+    runtime.BatteryService.set(state.batteryCharging === true);
   }
 };
 
@@ -488,7 +505,6 @@ const calibrateCurrent = (value, offset) => {
 };
 
 const onEnergyMeter = payload => {
-  if (!isRealHardwarePayload(payload)) return;
   // Never mutate the Socket.IO/Shelly payload in place. Keep an auditable raw snapshot.
   const raw = { ...payload };
 
@@ -506,10 +522,10 @@ const onEnergyMeter = payload => {
     c_voltage: numberOrNull(raw.c_voltage),
   };
 
-  // Measurement truth stays small and unscaled. Building-scale current is
-  // derived separately from real/simulated device states via BuildingTwinModel.
   measured.source_type = 'measured';
 
+  // Building current is not produced by multiplying Shelly current. The actual
+  // projected values are computed from confirmed Branch-A/B/Battery state.
   const projected = {
     source_type: 'digital_twin_from_real_state',
     projection_model: 'equivalent_devices_v1',
@@ -525,19 +541,16 @@ const onEnergyMeter = payload => {
 };
 
 const onBranchAAck = payload => {
-  if (!isRealHardwarePayload(payload)) return;
   _.realFeedback.branchA.ack = payload;
   _.realFeedback.branchA.ackUpdate = performance.now();
 };
 
 const onBranchBAck = payload => {
-  if (!isRealHardwarePayload(payload)) return;
   _.realFeedback.branchB.ack = payload;
   _.realFeedback.branchB.ackUpdate = performance.now();
 };
 
 const onBranchAStatus = payload => {
-  if (!isRealHardwarePayload(payload)) return;
   _.realFeedback.branchA.payload = payload;
   _.realFeedback.branchA.lastUpdate = performance.now();
 
@@ -592,21 +605,19 @@ const readRelay = (payload, index) => {
 };
 
 const onBranchBStatus = payload => {
-  if (!isRealHardwarePayload(payload)) return;
   _.realFeedback.branchB.payload = payload;
   _.realFeedback.branchB.lastUpdate = performance.now();
   const r0 = readRelay(payload, 0);
   const r1 = readRelay(payload, 1);
-  if (r0 !== null) _.wallbox.r0 = r0;
-  if (r1 !== null) _.wallbox.r1 = r1;
+  if (r0 !== null) { _.wallbox.r0 = r0; _.wallbox.r0Update = performance.now(); }
+  if (r1 !== null) { _.wallbox.r1 = r1; _.wallbox.r1Update = performance.now(); }
   if (_.wallbox.r0 !== null && _.wallbox.r1 !== null) _.wallbox.load = (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
 };
 
 const onWallbox = data => {
-  if (!isRealHardwarePayload(data)) return;
   const output = boolOrNull(data?.output);
-  if (data.id === 0 && output !== null) _.wallbox.r0 = output;
-  else if (data.id === 1 && output !== null) _.wallbox.r1 = output;
+  if (data.id === 0 && output !== null) { _.wallbox.r0 = output; _.wallbox.r0Update = performance.now(); }
+  else if (data.id === 1 && output !== null) { _.wallbox.r1 = output; _.wallbox.r1Update = performance.now(); }
 
   if (_.wallbox.r0 !== null && _.wallbox.r1 !== null) {
     _.wallbox.load = (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
@@ -614,12 +625,12 @@ const onWallbox = data => {
 };
 
 const onBattery = data => {
-  if (!isRealHardwarePayload(data)) return;
   const output = boolOrNull(data?.output);
-  if (output !== null) _.battery.charging = output;
+  if (output !== null) { _.battery.charging = output; _.battery.lastUpdate = performance.now(); }
 };
 
 const toggleWallbox = r => {
+  if (!controlReady.value) return;
   if (r === 0) {
     if (_.wallbox.r0 === null) return;
     const state = !_.wallbox.r0;
@@ -635,10 +646,12 @@ const toggleWallbox = r => {
 };
 
 const updateHeatpumpLoad = value => {
+  if (!controlReady.value) return;
   sendHeatpumpCommand(levelToHeatpumpCommand(clampInt(value, 0, HEATPUMP_LEVELS)));
 };
 
 const requestHeatpumpZeroHold = () => {
+  if (!controlReady.value) return;
   sendHeatpumpCommand(levelToHeatpumpCommand(0, 'zero_hold'));
 };
 
@@ -654,74 +667,183 @@ const animate = () => {
   animationFrame = requestAnimationFrame(animate);
 };
 
-const unbindRuntime = () => {
-  if (!boundRuntime) return;
-
-  boundRuntime.EnergyMeterService?.off?.('data', onEnergyMeter);
-  boundRuntime.WallboxService?.off?.('data', onWallbox);
-  boundRuntime.BatteryService?.off?.('data', onBattery);
-  boundRuntime.EspService?.off?.('branchA', onBranchAStatus);
-  boundRuntime.EspService?.off?.('branchA_ack', onBranchAAck);
-  boundRuntime.EspService?.off?.('branchB', onBranchBStatus);
-  boundRuntime.EspService?.off?.('branchB_ack', onBranchBAck);
-  boundRuntime.BranchBService?.off?.('branchB', onBranchBStatus);
-
-
-  boundRuntime = null;
+const clearStartupTimer = () => {
+  if (startupTimer !== null) window.clearTimeout(startupTimer);
+  startupTimer = null;
 };
 
-let bindGeneration = 0;
-
-const bindRealRuntime = async () => {
-  const generation = ++bindGeneration;
-  unbindRuntime();
-
-  if (!App._.servicesReady || !App.EnergyMeterService || !App.WallboxService || !App.BatteryService || !App.EspService) {
-    markRealStateWaiting();
+const updateStartupPhase = () => {
+  if (!App._.connected) {
+    clearStartupTimer();
+    _.startup.phase = 'connecting';
+    _.startup.message = App._.lastError || 'Waiting for Pi5/Socket.IO connection…';
     return;
   }
 
-  // Safe first-entry initialization:
-  // 1) invalidate UI state, 2) command all controllable REAL devices OFF,
-  // 3) subscribe, 4) request fresh feedback, 5) only then allow derived Twin values.
-  markRealStateWaiting();
-  await shutdownRealDevices();
-  if (generation !== bindGeneration) return;
+  if (!App._.servicesReady) {
+    _.startup.phase = 'services';
+    _.startup.message = 'Connected. Loading Pi5 services…';
+    return;
+  }
 
-  boundRuntime = App;
+  if (_.startup.requestedAt !== null && !_.mqtt.connected) {
+    _.startup.phase = 'requesting';
+    _.startup.message = 'Pi5 server connected, but MQTT broker is not ready.';
+  }
+
+  const state = branchAState.value;
+  const branchB = branchBState.value;
+  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
+    clearStartupTimer();
+    _.startup.phase = 'fault';
+    _.startup.message = `Branch A reports ${state}. Automatic and manual actuation stays blocked.`;
+    return;
+  }
+  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(branchB)) {
+    clearStartupTimer();
+    _.startup.phase = 'fault';
+    _.startup.message = `Branch B reports ${branchB}. Automatic and manual actuation stays blocked.`;
+    return;
+  }
+
+  if (startupAllReady.value) {
+    _.startup.phase = 'ready';
+    _.startup.completedAt = performance.now();
+    _.startup.message = startupActiveDevices.value.length > 0
+      ? `Initialization complete. Existing active hardware detected: ${startupActiveDevices.value.join(', ')}. No automatic STOP was sent.`
+      : 'Initialization complete. All required real-hardware states are known.';
+    clearStartupTimer();
+  }
+};
+
+const requestInitialHardwareState = async () => {
+  if (!App._.connected || !App._.servicesReady) return;
+
+  clearStartupTimer();
+  markRealStateWaiting();
+  _.energy_meter.timedelta = null;
+  _.energy_meter.lastUpdate = null;
+  _.energy_meter.raw = {};
+  _.energy_meter.measured = {};
+  _.energy_meter.projected = {};
+  _.agent.enabled = false;
+
+  _.startup.phase = 'requesting';
+  _.startup.message = 'Requesting fresh Shelly, Branch A, Branch B and battery status…';
+  _.startup.requestedAt = performance.now();
+  _.startup.completedAt = null;
+  _.startup.timeoutAt = null;
+
+  try {
+    const mqttStatus = await App.MqttService?.status?.();
+    _.mqtt.connected = mqttStatus?.connected === true;
+    _.mqtt.lastHeartbeatAt = mqttStatus?.last_heartbeat_at ?? null;
+  } catch {
+    _.mqtt.connected = false;
+    _.mqtt.lastHeartbeatAt = null;
+  }
+
+  await Promise.allSettled([
+    App.EnergyMeterService?.requestUpdate?.(),
+    App.WallboxService?.requestUpdate?.(),
+    App.BatteryService?.requestUpdate?.(),
+    App.EspService?.requestUpdate?.(),
+  ]);
+
+  // MQTT may connect while the hardware status requests are in flight.
+  try {
+    const mqttStatus = await App.MqttService?.status?.();
+    _.mqtt.connected = mqttStatus?.connected === true;
+    _.mqtt.lastHeartbeatAt = mqttStatus?.last_heartbeat_at ?? null;
+  } catch {
+    // Keep the previous MQTT state; startup will remain fail-closed.
+  }
+
+  updateStartupPhase();
+  if (startupAllReady.value) return;
+
+  startupTimer = window.setTimeout(() => {
+    if (startupAllReady.value) return;
+    _.startup.phase = 'timeout';
+    _.startup.timeoutAt = performance.now();
+    const missing = Object.entries(startupChecklist.value)
+      .filter(([, ready]) => !ready)
+      .map(([name]) => name)
+      .join(', ');
+    _.startup.message = `Initialization timed out. Missing/faulted: ${missing || 'unknown'}. Controls remain blocked.`;
+  }, STARTUP_TIMEOUT_MS);
+};
+
+const unbindRuntime = () => {
+  if (!boundRuntime) return;
+
+  App.EnergyMeterService?.off?.('data', onEnergyMeter);
+  App.WallboxService?.off?.('data', onWallbox);
+  App.BatteryService?.off?.('data', onBattery);
+  App.EspService?.off?.('branchA', onBranchAStatus);
+  App.EspService?.off?.('branchA_ack', onBranchAAck);
+  App.EspService?.off?.('branchB', onBranchBStatus);
+  App.EspService?.off?.('branchB_ack', onBranchBAck);
+  App.BranchBService?.off?.('branchB', onBranchBStatus);
+  boundRuntime = false;
+};
+
+const bindRuntime = async () => {
+  if (!App._.connected || !App._.servicesReady) {
+    unbindRuntime();
+    markRealStateWaiting();
+    updateStartupPhase();
+    return;
+  }
+
+  if (!App.EnergyMeterService || !App.WallboxService || !App.BatteryService || !App.EspService) {
+    _.startup.phase = 'services';
+    _.startup.message = 'Required Pi5 services are not available yet.';
+    return;
+  }
+
+  unbindRuntime();
   App.EnergyMeterService.on('data', onEnergyMeter);
   App.WallboxService.on('data', onWallbox);
   App.BatteryService.on('data', onBattery);
-  App.EspService?.on?.('branchA', onBranchAStatus);
-  App.EspService?.on?.('branchA_ack', onBranchAAck);
-  App.EspService?.on?.('branchB', onBranchBStatus);
-  App.EspService?.on?.('branchB_ack', onBranchBAck);
+  App.EspService.on?.('branchA', onBranchAStatus);
+  App.EspService.on?.('branchA_ack', onBranchAAck);
+  App.EspService.on?.('branchB', onBranchBStatus);
+  App.EspService.on?.('branchB_ack', onBranchBAck);
   App.BranchBService?.on?.('branchB', onBranchBStatus);
+  boundRuntime = true;
 
-  App.EnergyMeterService.requestUpdate?.();
-  App.WallboxService.requestUpdate?.();
-  App.BatteryService.requestUpdate?.();
-  App.EspService?.requestUpdate?.();
+  await requestInitialHardwareState();
+};
+
+const retryInitialization = async () => {
+  App.ensureConnected();
+  if (App._.connected && App._.servicesReady) await bindRuntime();
 };
 
 const init = () => {
   selectScenario('realistic');
-  clearRuntimeData();
-  markRealStateWaiting();
   App.ensureConnected();
-  void bindRealRuntime().catch(console.error);
+  updateStartupPhase();
 
-  unwatchServicesReady = watch(
-    () => App._.servicesReady,
-    ready => {
-      if (!ready) {
-        clearRuntimeData();
-        return;
+  unwatchConnection = watch(
+    () => [App._.connected, App._.servicesReady],
+    async ([connected, servicesReady], previous = []) => {
+      const [previousConnected, previousServicesReady] = previous;
+      if (connected && servicesReady && (!previousConnected || !previousServicesReady || !boundRuntime)) {
+        await bindRuntime();
+      } else if (!connected || !servicesReady) {
+        unbindRuntime();
+        markRealStateWaiting();
+        updateStartupPhase();
       }
-      void bindRealRuntime().catch(console.error);
-    }
+    },
+    { immediate: true }
   );
 
+  unwatchStartupChecklist = watch(startupChecklist, updateStartupPhase, { deep: true });
+  unwatchBranchAState = watch(branchAState, updateStartupPhase);
+  unwatchBranchBState = watch(branchBState, updateStartupPhase);
   animationFrame = requestAnimationFrame(animate);
 };
 
@@ -729,8 +851,15 @@ onMounted(init);
 
 onUnmounted(() => {
   if (animationFrame) cancelAnimationFrame(animationFrame);
-  unwatchServicesReady?.();
-  unwatchServicesReady = null;
+  unwatchConnection?.();
+  unwatchConnection = null;
+  unwatchStartupChecklist?.();
+  unwatchStartupChecklist = null;
+  unwatchBranchAState?.();
+  unwatchBranchAState = null;
+  unwatchBranchBState?.();
+  unwatchBranchBState = null;
+  clearStartupTimer();
   unbindRuntime();
 });
 </script>
@@ -745,18 +874,35 @@ onUnmounted(() => {
 
       <div class="runtime-switch">
         <span class="runtime-label">RUN MODE</span>
-        <span class="real-mode-badge">REAL HARDWARE</span>
-        <span class="runtime-status" :class="App._.connected && App._.servicesReady ? 'online' : 'offline'">
-          {{ App._.connected && App._.servicesReady ? 'Pi5 CONNECTED' : 'WAITING FOR Pi5' }}
+        <span class="runtime-fixed">REAL HARDWARE</span>
+        <span class="runtime-status" :class="App._.connected ? 'online' : 'offline'">
+          {{ App._.connected ? 'Pi5 CONNECTED' : 'Pi5 DISCONNECTED' }}
         </span>
       </div>
     </header>
 
-    <div v-if="!App._.servicesReady" class="startup-waiting-panel">
-      <strong>REAL HARDWARE INITIALIZATION / REAL HARDWARE 初始化</strong>
-      <p>
-        Waiting for Pi5 services. Device states and Building-Twin values remain NO DATA until fresh REAL feedback arrives.
-        / 正在等待 Pi5 服务。收到新的真实硬件回传之前，设备状态与 Building Twin 数值保持 NO DATA。
+    <div class="startup-panel" :class="_.startup.phase">
+      <div class="startup-head">
+        <div>
+          <strong>Startup Initialization / 首次进入初始化检查</strong>
+          <p>{{ _.startup.message }}</p>
+        </div>
+        <div class="startup-actions">
+          <span class="startup-badge">{{ startupStatusLabel }}</span>
+          <button type="button" @click="retryInitialization">RECHECK / 重新检查</button>
+        </div>
+      </div>
+      <div class="startup-checks">
+        <span :class="{ ok: startupChecklist.socket }">Socket {{ startupChecklist.socket ? '✓' : '…' }}</span>
+        <span :class="{ ok: startupChecklist.services }">Services {{ startupChecklist.services ? '✓' : '…' }}</span>
+        <span :class="{ ok: startupChecklist.mqtt }">MQTT {{ startupChecklist.mqtt ? '✓' : '…' }}</span>
+        <span :class="{ ok: startupChecklist.measurement }">Shelly {{ startupChecklist.measurement ? '✓' : '…' }}</span>
+        <span :class="{ ok: startupChecklist.branchA }">Branch A {{ startupChecklist.branchA ? '✓' : '…' }}</span>
+        <span :class="{ ok: startupChecklist.branchB }">Branch B {{ startupChecklist.branchB ? '✓' : '…' }}</span>
+        <span :class="{ ok: startupChecklist.battery }">Battery {{ startupChecklist.battery ? '✓' : '…' }}</span>
+      </div>
+      <p v-if="startupActiveDevices.length > 0" class="startup-warning">
+        Active state found / 检测到设备处于运行状态: {{ startupActiveDevices.join(' · ') }}. Browser startup does not send automatic STOP.
       </p>
     </div>
 
@@ -765,8 +911,8 @@ onUnmounted(() => {
         <div>
           <strong>Senergate Grid Impedance / Netzimpedanz / 电网阻抗</strong>
           <p>
-            MODELED building-scale parameters driven by REAL execution states. VUF remains ESTIMATED; these are not measured/calibrated site data.
-            / 建筑级模型参数由真实执行状态驱动；VUF 仍为 ESTIMATED，这些参数不是现场实测/校准值。
+            MODELED building-scale parameters for REAL HARDWARE. VUF remains ESTIMATED; these are not measured/calibrated site data.
+            / REAL HARDWARE 使用的建筑级模型参数；VUF 仍为 ESTIMATED，这些参数不是现场实测/校准值。
           </p>
         </div>
         <span class="grid-provenance">{{ _.grid.provenance.toUpperCase() }}</span>
@@ -840,7 +986,7 @@ onUnmounted(() => {
 
     <div class="footer-meta">
       <span>
-        Data source: REAL HARDWARE ·
+        Data source: REAL HARDWARE · Building Twin ESTIMATED ·
         Measurement age:
         {{ _.energy_meter.timedelta !== null ? `${_.energy_meter.timedelta.toFixed(1)} s` : '--' }}
       </span>
@@ -859,5 +1005,5 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.real-mode-badge{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.startup-waiting-panel{margin-top:14px;padding:12px 16px;border:1px solid #665c2d;border-radius:16px;background:#19170d}.startup-waiting-panel strong{font-size:12px;color:#ffe795}.startup-waiting-panel p{margin:5px 0 0;color:#b9aa78;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
+.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
 </style>
