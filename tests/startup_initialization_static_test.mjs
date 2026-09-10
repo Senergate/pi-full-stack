@@ -27,8 +27,10 @@ if (!dashboard.includes("_.startup.phase === 'ready'")) throw new Error('Control
 if (!dashboard.includes('if (n === null) return null;')) {
   throw new Error('Missing Branch-A frequency must remain UNKNOWN; it must not be converted to level 0/OFF.');
 }
-if (!dashboard.includes('branchB: startupRequestReceived(_.realFeedback.branchB.lastUpdate) && branchBReady.value')) {
-  throw new Error('Startup Branch-B checklist must use the same readiness gate as runtime control.');
+if (!dashboard.includes('startupRequestReceived(_.wallbox.r0Update)') ||
+    !dashboard.includes('startupRequestReceived(_.wallbox.r1Update)') ||
+    !dashboard.includes('branchBReady.value')) {
+  throw new Error('Startup Branch-B checklist must require fresh Shelly relay 0 and relay 1 status.');
 }
 
 console.log('startup_initialization_static_test: PASS');

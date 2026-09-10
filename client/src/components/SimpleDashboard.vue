@@ -96,7 +96,6 @@ const _ = reactive({
   },
   realFeedback: {
     branchA: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
-    branchB: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
   },
 });
 
@@ -104,7 +103,6 @@ let animationFrame = null;
 let unwatchConnection = null;
 let unwatchStartupChecklist = null;
 let unwatchBranchAState = null;
-let unwatchBranchBState = null;
 let boundRuntime = false;
 let startupTimer = null;
 
@@ -188,7 +186,6 @@ const markRealStateWaiting = () => {
   _.battery.charging = null;
   _.battery.lastUpdate = null;
   _.realFeedback.branchA = { payload: null, ack: null, lastUpdate: null, ackUpdate: null };
-  _.realFeedback.branchB = { payload: null, ack: null, lastUpdate: null, ackUpdate: null };
 };
 
 const setGridPreset = key => {
@@ -338,17 +335,20 @@ const branchAReady = computed(() => {
   return last !== null && performance.now() - last < 3000;
 });
 
-const branchBState = computed(() =>
-  String(_.realFeedback.branchB.payload?.state ?? _.realFeedback.branchB.payload?.safety?.state ?? '').toUpperCase()
-);
+const BRANCH_B_STATUS_FRESH_MS = 3000;
 
 const branchBReady = computed(() => {
-  const state = branchBState.value;
-  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) return false;
-  const last = numberOrNull(_.realFeedback.branchB.lastUpdate);
-  const statusFresh = last !== null && performance.now() - last < 3000;
-  const relaysKnown = _.wallbox.r0 !== null && _.wallbox.r1 !== null;
-  return statusFresh && relaysKnown;
+  // Branch B is NOT an ESP32 device in the current prototype. Its execution
+  // truth comes directly from WallboxService/Shelly switch status for both
+  // physical resistor channels.
+  const now = performance.now();
+  const r0Update = numberOrNull(_.wallbox.r0Update);
+  const r1Update = numberOrNull(_.wallbox.r1Update);
+
+  const r0Fresh = _.wallbox.r0 !== null && r0Update !== null && now - r0Update < BRANCH_B_STATUS_FRESH_MS;
+  const r1Fresh = _.wallbox.r1 !== null && r1Update !== null && now - r1Update < BRANCH_B_STATUS_FRESH_MS;
+
+  return r0Fresh && r1Fresh;
 });
 
 const startupRequestReceived = update => {
@@ -363,7 +363,10 @@ const startupChecklist = computed(() => ({
   mqtt: _.mqtt.connected === true,
   measurement: startupRequestReceived(_.energy_meter.lastUpdate),
   branchA: startupRequestReceived(_.realFeedback.branchA.lastUpdate) && branchAReady.value,
-  branchB: startupRequestReceived(_.realFeedback.branchB.lastUpdate) && branchBReady.value,
+  branchB:
+    startupRequestReceived(_.wallbox.r0Update) &&
+    startupRequestReceived(_.wallbox.r1Update) &&
+    branchBReady.value,
   battery: startupRequestReceived(_.battery.lastUpdate) && _.battery.charging !== null,
 }));
 
@@ -412,7 +415,7 @@ const controlBlockedReason = computed(() => {
   if (_.startup.phase !== 'ready') return `Startup initialization not complete: ${startupStatusLabel.value}`;
   if (!measurementFresh.value) return 'Measurement data stale or unavailable';
   if (!branchAReady.value) return 'Branch-A status stale or Branch-A is not ready';
-  if (!branchBReady.value) return 'Branch-B status stale or relay state is unknown';
+  if (!branchBReady.value) return 'Branch-B Shelly relay status stale or relay state is unknown';
   return '';
 });
 
@@ -425,8 +428,10 @@ const commandFeedback = computed(() => ({
     fresh: branchAReady.value,
   },
   branchB: {
-    ack: _.realFeedback.branchB.ack,
-    status: _.realFeedback.branchB.payload,
+    ack: null,
+    status: branchBReady.value
+      ? `Shelly relays confirmed: R0=${_.wallbox.r0 ? 'ON' : 'OFF'}, R1=${_.wallbox.r1 ? 'ON' : 'OFF'}`
+      : 'Shelly relay status unknown/stale',
   },
 }));
 
@@ -562,11 +567,6 @@ const onBranchAAck = payload => {
   _.realFeedback.branchA.ackUpdate = performance.now();
 };
 
-const onBranchBAck = payload => {
-  _.realFeedback.branchB.ack = payload;
-  _.realFeedback.branchB.ackUpdate = performance.now();
-};
-
 const onBranchAStatus = payload => {
   _.realFeedback.branchA.payload = payload;
   _.realFeedback.branchA.lastUpdate = performance.now();
@@ -619,16 +619,6 @@ const readRelay = (payload, index) => {
   }
 
   return null;
-};
-
-const onBranchBStatus = payload => {
-  _.realFeedback.branchB.payload = payload;
-  _.realFeedback.branchB.lastUpdate = performance.now();
-  const r0 = readRelay(payload, 0);
-  const r1 = readRelay(payload, 1);
-  if (r0 !== null) { _.wallbox.r0 = r0; _.wallbox.r0Update = performance.now(); }
-  if (r1 !== null) { _.wallbox.r1 = r1; _.wallbox.r1Update = performance.now(); }
-  if (_.wallbox.r0 !== null && _.wallbox.r1 !== null) _.wallbox.load = (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
 };
 
 const onWallbox = data => {
@@ -709,17 +699,10 @@ const updateStartupPhase = () => {
   }
 
   const state = branchAState.value;
-  const branchB = branchBState.value;
   if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
     clearStartupTimer();
     _.startup.phase = 'fault';
     _.startup.message = `Branch A reports ${state}. Automatic and manual actuation stays blocked.`;
-    return;
-  }
-  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(branchB)) {
-    clearStartupTimer();
-    _.startup.phase = 'fault';
-    _.startup.message = `Branch B reports ${branchB}. Automatic and manual actuation stays blocked.`;
     return;
   }
 
@@ -746,7 +729,7 @@ const requestInitialHardwareState = async () => {
   _.agent.enabled = false;
 
   _.startup.phase = 'requesting';
-  _.startup.message = 'Requesting fresh Shelly, Branch A, Branch B and battery status…';
+  _.startup.message = 'Requesting fresh Shelly measurements, Branch A, Branch-B Shelly relay states and battery status…';
   _.startup.requestedAt = performance.now();
   _.startup.completedAt = null;
   _.startup.timeoutAt = null;
@@ -799,9 +782,6 @@ const unbindRuntime = () => {
   App.BatteryService?.off?.('data', onBattery);
   App.EspService?.off?.('branchA', onBranchAStatus);
   App.EspService?.off?.('branchA_ack', onBranchAAck);
-  App.EspService?.off?.('branchB', onBranchBStatus);
-  App.EspService?.off?.('branchB_ack', onBranchBAck);
-  App.BranchBService?.off?.('branchB', onBranchBStatus);
   boundRuntime = false;
 };
 
@@ -825,9 +805,6 @@ const bindRuntime = async () => {
   App.BatteryService.on('data', onBattery);
   App.EspService.on?.('branchA', onBranchAStatus);
   App.EspService.on?.('branchA_ack', onBranchAAck);
-  App.EspService.on?.('branchB', onBranchBStatus);
-  App.EspService.on?.('branchB_ack', onBranchBAck);
-  App.BranchBService?.on?.('branchB', onBranchBStatus);
   boundRuntime = true;
 
   await requestInitialHardwareState();
@@ -860,7 +837,6 @@ const init = () => {
 
   unwatchStartupChecklist = watch(startupChecklist, updateStartupPhase, { deep: true });
   unwatchBranchAState = watch(branchAState, updateStartupPhase);
-  unwatchBranchBState = watch(branchBState, updateStartupPhase);
   animationFrame = requestAnimationFrame(animate);
 };
 
@@ -874,8 +850,6 @@ onUnmounted(() => {
   unwatchStartupChecklist = null;
   unwatchBranchAState?.();
   unwatchBranchAState = null;
-  unwatchBranchBState?.();
-  unwatchBranchBState = null;
   clearStartupTimer();
   unbindRuntime();
 });
@@ -915,7 +889,7 @@ onUnmounted(() => {
         <span :class="{ ok: startupChecklist.mqtt }">MQTT {{ startupChecklist.mqtt ? '✓' : '…' }}</span>
         <span :class="{ ok: startupChecklist.measurement }">Shelly {{ startupChecklist.measurement ? '✓' : '…' }}</span>
         <span :class="{ ok: startupChecklist.branchA }">Branch A {{ startupChecklist.branchA ? '✓' : '…' }}</span>
-        <span :class="{ ok: startupChecklist.branchB }">Branch B {{ startupChecklist.branchB ? '✓' : '…' }}</span>
+        <span :class="{ ok: startupChecklist.branchB }">Branch B · Shelly R0/R1 {{ startupChecklist.branchB ? '✓' : '…' }}</span>
         <span :class="{ ok: startupChecklist.battery }">Battery {{ startupChecklist.battery ? '✓' : '…' }}</span>
       </div>
       <p v-if="startupActiveDevices.length > 0" class="startup-warning">
