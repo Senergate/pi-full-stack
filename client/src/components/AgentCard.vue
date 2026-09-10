@@ -72,8 +72,9 @@
         </div>
 
         <div class="device-value">{{ formatDeviceLevel(displayedState.heatpump) }} <small>/ 5</small></div>
-        <small v-if="pendingDevices.heatpump" class="pending-note">pending → {{ pendingTargetState.heatpump }}/5</small>
+        <small v-if="pendingDevices.heatpump" class="pending-note">pending → {{ pendingTargetState.heatpump }}/5 · confirm window 12 s</small>
         <small v-else-if="normalizedDeviceStates.heatpump === null" class="pending-note">waiting for Branch-A status</small>
+        <small v-if="heatpumpExecutionText" class="device-diagnostic">{{ heatpumpExecutionText }}</small>
 
         <div class="segments">
           <button
@@ -167,7 +168,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 const CRITICAL_VUF = 2.0;
 const SETTLE_TIME_MS = 5000;
 const TICK_MS = 250;
-const COMMAND_PENDING_TIMEOUT_MS = 3000;
+const COMMAND_PENDING_TIMEOUT_MS = Object.freeze({ heatpump: 12000, wallbox: 3000, batteryCharging: 3000 });
 const MIN_IMPROVEMENT = 0.01;
 const MAX_HEATPUMP = 5;
 const MAX_WALLBOX = 3;
@@ -264,6 +265,22 @@ const latestFeedbackLines = computed(() => {
   };
 });
 
+const heatpumpExecutionText = computed(() => {
+  const branchA = props.commandFeedback?.branchA ?? {};
+  const state = String(branchA.executionState ?? '').trim();
+  const finiteOrNull = value => {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+  const target = finiteOrNull(branchA.targetHz);
+  const actual = finiteOrNull(branchA.actualHz);
+  if (!state && target === null && actual === null) return '';
+  const targetText = target === null ? '--' : `${target.toFixed(1)} Hz`;
+  const actualText = actual === null ? '--' : `${actual.toFixed(1)} Hz`;
+  return `${state || 'STATE --'} · target ${targetText} · actual ${actualText}`;
+});
+
 const clearPending = key => {
   pendingDevices[key] = false;
   pendingTargetState[key] = null;
@@ -285,10 +302,15 @@ const expirePendingCommands = () => {
   const currentTime = Date.now();
   for (const key of Object.keys(pendingDevices)) {
     if (!pendingDevices[key] || pendingSince[key] === null) continue;
-    if (currentTime - pendingSince[key] < COMMAND_PENDING_TIMEOUT_MS) continue;
+    const timeout = COMMAND_PENDING_TIMEOUT_MS[key] ?? 3000;
+    if (currentTime - pendingSince[key] < timeout) continue;
     const target = pendingTargetState[key];
     clearPending(key);
-    addLog('Command confirmation timeout', `${key} target ${String(target)} was not confirmed within 3 s. Pending was released; execution was NOT assumed successful.`, 'warning');
+    addLog(
+      'Command confirmation timeout',
+      `${key} target ${String(target)} was not confirmed within ${(timeout / 1000).toFixed(0)} s. Pending was released; execution was NOT assumed successful.`,
+      'warning'
+    );
   }
 };
 
@@ -354,11 +376,8 @@ const getReductionCandidates = current => {
     const nextHeatpump = current.heatpump - 1;
     if (nextHeatpump / MAX_HEATPUMP >= MIN_LOAD_RATIO) candidates.push({ ...current, heatpump: nextHeatpump });
   }
-
-  // Wallbox is a 2-bit relay mask, not a linear level.
   if ((current.wallbox & 1) !== 0) candidates.push({ ...current, wallbox: current.wallbox & ~1 });
   if ((current.wallbox & 2) !== 0) candidates.push({ ...current, wallbox: current.wallbox & ~2 });
-
   if (current.batteryCharging) candidates.push({ ...current, batteryCharging: false });
   return candidates;
 };
@@ -386,15 +405,7 @@ const evaluateCandidates = async candidates => {
 const chooseNextAction = async () => {
   if (hasUnknownDeviceState.value) return null;
   const current = { ...normalizedDeviceStates.value };
-
-  // Compare every permitted one-step transition in one search space. This
-  // avoids the old reduction-first greedy behaviour and lets Branch B win
-  // when adding an equivalent wallbox improves VUF more than trimming Branch A.
-  const candidates = [
-    ...getReductionCandidates(current),
-    ...getCompensationCandidates(current),
-  ];
-
+  const candidates = [...getReductionCandidates(current), ...getCompensationCandidates(current)];
   const unique = [];
   const seen = new Set();
   for (const candidate of candidates) {
@@ -403,7 +414,6 @@ const chooseNextAction = async () => {
     seen.add(key);
     unique.push(candidate);
   }
-
   const best = await evaluateCandidates(unique);
   if (!best || best.vuf >= Number(props.vuf) - MIN_IMPROVEMENT) return null;
   return { ...best, reason: 'optimize' };
@@ -561,5 +571,5 @@ onUnmounted(() => { if (timer.value) window.clearInterval(timer.value); });
 </script>
 
 <style scoped>
-.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.log-dot.critical{background:var(--red)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
+.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.log-dot.critical{background:var(--red)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-diagnostic{display:block;margin:-2px 0 8px;color:#83a7bd;font-size:9px;line-height:1.4}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
 </style>

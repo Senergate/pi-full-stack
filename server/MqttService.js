@@ -16,17 +16,6 @@ const MqttService = {
       reconnectPeriod: 1000,
     }),
 
-  _publishPi5Heartbeat: () => {
-    if (!MqttService.connected || !MqttService.bus) return false;
-    const payload = JSON.stringify({
-      source: 'pi5-node-backend',
-      ts_pi: Date.now() / 1000,
-    });
-    MqttService.bus.publish(PI5_HEARTBEAT_TOPIC, payload, { qos: 0, retain: false });
-    MqttService.lastHeartbeatAt = Date.now();
-    return true;
-  },
-
   status: () => ({
     connected: MqttService.connected,
     heartbeat_topic: PI5_HEARTBEAT_TOPIC,
@@ -34,22 +23,29 @@ const MqttService = {
     last_heartbeat_at: MqttService.lastHeartbeatAt,
   }),
 
+  _publishPi5Heartbeat: () => {
+    if (!MqttService.connected || !MqttService.bus) return false;
+    MqttService.bus.publish(
+      PI5_HEARTBEAT_TOPIC,
+      JSON.stringify({ source: 'pi5-node-backend', ts_pi: Date.now() / 1000 }),
+      { qos: 0, retain: false }
+    );
+    MqttService.lastHeartbeatAt = Date.now();
+    return true;
+  },
+
   init: async () => {
     console.log('init mqtt service');
     MqttService.bus = MqttService.createMqttClient();
 
     if (!MqttService.heartbeatTimer) {
-      MqttService.heartbeatTimer = setInterval(
-        () => MqttService._publishPi5Heartbeat(),
-        HEARTBEAT_PERIOD_MS
-      );
+      MqttService.heartbeatTimer = setInterval(() => MqttService._publishPi5Heartbeat(), HEARTBEAT_PERIOD_MS);
       MqttService.heartbeatTimer.unref?.();
     }
 
     MqttService.bus.on('connect', () => {
       MqttService.connected = true;
       console.log('mqtt bus connected');
-      // Send immediately so ESP32 safety does not need to wait one timer period.
       MqttService._publishPi5Heartbeat();
     });
 

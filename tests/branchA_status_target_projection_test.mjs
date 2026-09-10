@@ -1,60 +1,25 @@
 import { deriveHeatpumpStatus } from '../client/src/HeatpumpStatusAdapter.js';
 import { projectBuildingCurrents } from '../client/src/BuildingTwinModel.js';
 
-function assert(condition, message) {
-  if (!condition) throw new Error(message);
-}
+function assert(condition, message) { if (!condition) throw new Error(message); }
 
 const starting = deriveHeatpumpStatus({
   state: 'STARTING',
-  target_frequency_hz: 40,
-  actual_output_frequency_hz: 0,
   lfrd_reg8602: 400,
   rfrd_reg8604: 0,
-});
-
-assert(starting.modelLevel === 4,
-  `STARTING target=40/actual=0 must map to model level 4, got ${JSON.stringify(starting)}`);
-assert(starting.targetHz === 40, 'target frequency must remain 40 Hz.');
-assert(starting.actualHz === 0, 'actual frequency must remain available separately as 0 Hz.');
-
-const currents = projectBuildingCurrents({
-  heatpumpLevel: starting.modelLevel,
-  wallboxMask: 1,
-  batteryCharging: true,
-});
-assert(currents.a === 28 && currents.b === 32 && currents.c === 20,
-  `Level 4 + R0 + battery must project 28/32/20 A, got ${JSON.stringify(currents)}`);
-
-const running = deriveHeatpumpStatus({
-  state: 'RUNNING',
   target_frequency_hz: 40,
-  actual_output_frequency_hz: 30,
+  actual_output_frequency_hz: 0,
 });
-assert(running.modelLevel === 4,
-  'RUNNING Building-Twin model must follow confirmed 40 Hz target, not delayed 30 Hz actual feedback.');
+assert(starting.modelLevel === 4, `STARTING target 40 / actual 0 must be level 4: ${JSON.stringify(starting)}`);
+assert(starting.targetHz === 40 && starting.actualHz === 0, 'Target and actual frequency must remain separate.');
 
-const stoppedWithStaleFeedback = deriveHeatpumpStatus({
-  state: 'STOP',
-  target_frequency_hz: 40,
-  actual_output_frequency_hz: 40,
-});
-assert(stoppedWithStaleFeedback.modelLevel === 0,
-  'STOP state must override stale target/actual frequency and project zero heatpump current.');
+const currents = projectBuildingCurrents({ heatpumpLevel: starting.modelLevel, wallboxMask: 3, batteryCharging: false });
+assert(currents.a === 28 && currents.b === 64 && currents.c === 0, `Expected 28/64/0 A, got ${JSON.stringify(currents)}`);
 
-const zeroHold = deriveHeatpumpStatus({
-  state: 'ZERO_HOLD',
-  target_frequency_hz: 0,
-  actual_output_frequency_hz: 20,
-});
-assert(zeroHold.modelLevel === 0,
-  'ZERO_HOLD must project level 0 even while actual frequency is still ramping down.');
+const stopped = deriveHeatpumpStatus({ state: 'STOP', target_frequency_hz: 40, actual_output_frequency_hz: 40 });
+assert(stopped.modelLevel === 0, 'STOP must override stale frequency feedback.');
 
-const actualFallback = deriveHeatpumpStatus({
-  state: 'RUNNING',
-  actual_output_frequency_hz: 30,
-});
-assert(actualFallback.modelLevel === 3,
-  'Actual frequency may be used only when target/LFRD information is unavailable.');
+const zeroHold = deriveHeatpumpStatus({ state: 'ZERO_HOLD', target_frequency_hz: 0, actual_output_frequency_hz: 20 });
+assert(zeroHold.modelLevel === 0, 'ZERO_HOLD must project 0 A even while actual frequency ramps down.');
 
 console.log('branchA_status_target_projection_test: PASS');

@@ -1,14 +1,10 @@
 /*
- * Branch-A status adapter for the REAL-HARDWARE dashboard.
+ * Branch-A status adapter.
  *
- * Important distinction:
- *   - target_frequency_hz / LFRD describe the confirmed Branch-A setpoint.
- *   - actual_output_frequency_hz / RFRD describe delayed drive feedback.
- *
- * The Building-Twin current model is a setpoint-based equivalent-device model,
- * not a direct measurement of motor current. Therefore STARTING/RUNNING states
- * must use the confirmed target setpoint first. Otherwise a valid start,40 can
- * remain displayed as level 0 while RFRD is still 0 Hz during startup.
+ * target_frequency_hz / LFRD = confirmed Branch-A setpoint and therefore the
+ * source for the Building-Twin equivalent-device state.
+ * actual_output_frequency_hz / RFRD = delayed physical drive feedback used for
+ * diagnostics. It is only a fallback if target information is absent.
  */
 
 const HEATPUMP_LEVELS = 5;
@@ -82,7 +78,6 @@ export const deriveHeatpumpStatus = payload => {
 
   const actualHz = actualHzDirect ?? (rawRfrd === null ? null : rawRfrd / 10);
 
-  // Safety/local-state semantics always override stale frequency feedback.
   if (['STOP', 'STOPPED', 'READY', 'SAFE_MODE', 'FAULT', 'ERROR', 'ZERO_HOLD'].includes(state)) {
     return { state, modelLevel: 0, targetHz, actualHz };
   }
@@ -96,13 +91,9 @@ export const deriveHeatpumpStatus = payload => {
     };
   }
 
-  // The Building-Twin load is driven by the confirmed target setpoint.
-  // RFRD/actual frequency is only a fallback if no target information exists.
-  const modelHz = targetHz ?? actualHz;
-
   return {
     state,
-    modelLevel: frequencyHzToHeatpumpLevel(modelHz),
+    modelLevel: frequencyHzToHeatpumpLevel(targetHz ?? actualHz),
     targetHz,
     actualHz,
   };

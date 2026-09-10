@@ -11,9 +11,8 @@
  *   Branch B: 1 relay/resistor -> 2 equivalent wallboxes
  *             2 relays         -> 4 equivalent wallboxes
  *
- * The current values below are DEMO DEVICE-MODEL assumptions. They are not
- * measured site currents and should later be replaced by nameplate/validated
- * load curves when those are available.
+ * Current values are DEMO DEVICE-MODEL assumptions and can later be replaced
+ * by validated nameplate/load-curve data.
  */
 
 export const BUILDING_TWIN_CONFIG = Object.freeze({
@@ -21,16 +20,12 @@ export const BUILDING_TWIN_CONFIG = Object.freeze({
 
   branchAEquivalentHeatpumps: 3,
   heatpumpLevels: 5,
-  // Aggregate building-scale contribution of the 3 equivalent heat pumps.
   heatpumpAggregateMaxCurrentA: 35,
 
   branchBEquivalentWallboxesPerRelay: 2,
-  // Single-phase modeled current per equivalent wallbox.
   wallboxCurrentPerDeviceA: 16,
 
-  // Independent modeled contribution for the current battery prototype state.
   batteryChargeCurrentA: 20,
-
   provenance: 'demo_equivalent_device_model_v2',
 });
 

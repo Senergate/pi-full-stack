@@ -1,0 +1,12 @@
+import fs from 'node:fs';
+const dash = fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue', import.meta.url), 'utf8');
+const model = fs.readFileSync(new URL('../client/src/BuildingTwinModel.js', import.meta.url), 'utf8');
+if (!dash.includes('const controlReady = computed(() => measurementFresh.value && branchAReady.value)')) throw new Error('Global control gate regressed.');
+const applyStart = dash.indexOf('const applyAgentDeviceState');
+const applyEnd = dash.indexOf('const onAgentEnabledChange', applyStart);
+const apply = dash.slice(applyStart, applyEnd);
+if (apply.includes('_.wallbox.r0 = null') || apply.includes('_.wallbox.r1 = null')) throw new Error('Relay command must not null confirmed state.');
+if (!apply.includes('if (_.wallbox.r0 !== targetR0) runtime.WallboxService.set(0, targetR0)')) throw new Error('Relay 0 delta command missing.');
+if (!apply.includes('if (_.wallbox.r1 !== targetR1) runtime.WallboxService.set(1, targetR1)')) throw new Error('Relay 1 delta command missing.');
+if (/projectionGain|CURRENT_PROJECTION_FACTOR/.test(model)) throw new Error('Legacy phase gains remain in BuildingTwinModel.');
+console.log('control_regression_static_test: PASS');
