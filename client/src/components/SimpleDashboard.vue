@@ -3,6 +3,14 @@ import { computed, onMounted, onUnmounted, reactive, watch } from 'vue';
 
 import App from '../App.js';
 import SimulationRuntime from '../SimulationRuntime.js';
+import {
+  BUILDING_TWIN_CONFIG,
+  batteryProjectedCurrentA,
+  heatpumpProjectedCurrentA,
+  projectBuildingCurrents,
+  wallboxMaskFromRelays,
+  wallboxProjectedCurrentA,
+} from '../BuildingTwinModel.js';
 import PhasorCalculator from './PhasorCalculator.js';
 import VufCard from './VufCard.vue';
 import CurrentCard from './CurrentCard.vue';
@@ -48,22 +56,15 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const HEATPUMP_MAX_CURRENT = 35;
-const WALLBOX_R0_CURRENT = 16;
-const WALLBOX_R1_CURRENT = 16;
-const BATTERY_CHARGE_CURRENT = 20;
-const HEATPUMP_LEVELS = 5;
+const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
 // Shelly zero-current calibration remains part of the measured layer.
 const CURRENT_ZERO_OFFSET_A = { a: 0.24, b: 0.19, c: 0.13 };
 
-// Building-scale projection is a Digital-Twin assumption, never a measured value.
-const CURRENT_PROJECTION_FACTOR = { a: 800, b: 400, c: 230 };
-
 const _ = reactive({
   count: 0,
-  heatpump: { level: 0, mode: null, commanded: null },
+  heatpump: { level: 0, commanded: null },
   wallbox: { load: 0, r0: false, r1: false },
   battery: { charging: false },
   energy_meter: {
@@ -86,6 +87,7 @@ const _ = reactive({
     provenance: 'modeled',
   },
   agent: { enabled: false },
+  runtimeSwitching: false,
   realFeedback: {
     branchA: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
     branchB: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
@@ -99,14 +101,11 @@ let boundRuntime = null;
 const isSimulation = computed(() => App._.mode === 'simulation');
 const currentSourceLabel = computed(() =>
   isSimulation.value
-    ? 'DIGITAL TWIN SIMULATED · local sensor model'
-    : 'SCALED FROM MEASURED · Digital Twin'
+    ? 'BUILDING-SCALE DIGITAL TWIN · simulated device state'
+    : 'BUILDING-SCALE DIGITAL TWIN · real execution state'
 );
 
-const currentYRange = computed(() => ({
-  min: 0,
-  max: isSimulation.value ? 350 : 100,
-}));
+const currentYRange = computed(() => ({ min: 0, max: 350 }));
 
 const getRuntime = () => isSimulation.value ? SimulationRuntime : App;
 
@@ -147,8 +146,8 @@ const frequencyHzToLevel = hz => {
 
 const levelToHeatpumpCommand = (level, forcedMode = null) => {
   const safeLevel = clampInt(level, 0, HEATPUMP_LEVELS);
-  if (forcedMode === 'stop') return { mode: 'stop', level: 0, target_hz: 0 };
-  if (forcedMode === 'zero_hold' || safeLevel === 0) return { mode: 'zero_hold', level: 0, target_hz: 0 };
+  if (forcedMode === 'zero_hold') return { mode: 'zero_hold', level: 0, target_hz: 0 };
+  if (forcedMode === 'stop' || safeLevel === 0) return { mode: 'stop', level: 0, target_hz: 0 };
   return { mode: 'start', level: safeLevel, target_hz: levelToTargetHz(safeLevel) };
 };
 
@@ -180,6 +179,48 @@ const markRealStateWaiting = () => {
   _.wallbox.r0 = null;
   _.wallbox.r1 = null;
   _.battery.charging = null;
+};
+
+const clearRuntimeData = () => {
+  _.count = 0;
+  _.heatpump.level = null;
+  _.heatpump.commanded = null;
+  _.wallbox.load = null;
+  _.wallbox.r0 = null;
+  _.wallbox.r1 = null;
+  _.battery.charging = null;
+  _.energy_meter.timedelta = null;
+  _.energy_meter.lastUpdate = null;
+  _.energy_meter.raw = {};
+  _.energy_meter.measured = {};
+  _.energy_meter.projected = {};
+  _.realFeedback.branchA = { payload: null, ack: null, lastUpdate: null, ackUpdate: null };
+  _.realFeedback.branchB = { payload: null, ack: null, lastUpdate: null, ackUpdate: null };
+  _.agent.enabled = false;
+};
+
+const payloadMatchesActiveMode = payload => {
+  const simulated = payload?.simulation === true || payload?.simulation_mode === true || payload?.source_type === 'simulated_sensor';
+  return isSimulation.value ? simulated : !simulated;
+};
+
+const shutdownRuntimeDevices = async runtime => {
+  if (!runtime) return;
+
+  if (runtime === SimulationRuntime) {
+    SimulationRuntime.shutdown();
+    return;
+  }
+
+  const requests = [];
+  if (runtime.EspService?.heatpump) requests.push(Promise.resolve(runtime.EspService.heatpump(levelToHeatpumpCommand(0, 'stop'))));
+  if (runtime.WallboxService?.set) {
+    requests.push(Promise.resolve(runtime.WallboxService.set(0, false)));
+    requests.push(Promise.resolve(runtime.WallboxService.set(1, false)));
+  }
+  if (runtime.BatteryService?.set) requests.push(Promise.resolve(runtime.BatteryService.set(false)));
+
+  await Promise.allSettled(requests);
 };
 
 const setGridPreset = key => {
@@ -231,11 +272,22 @@ const measuredCurrents = computed(() => ({
   c: numberOrNull(_.energy_meter.measured.c_current),
 }));
 
-const projectedCurrents = computed(() => ({
-  a: numberOrNull(_.energy_meter.projected.a_current),
-  b: numberOrNull(_.energy_meter.projected.b_current),
-  c: numberOrNull(_.energy_meter.projected.c_current),
-}));
+const projectedCurrents = computed(() => {
+  const heatpumpLevel = numberOrNull(_.heatpump.level);
+  const r0 = _.wallbox.r0;
+  const r1 = _.wallbox.r1;
+  const batteryCharging = _.battery.charging;
+
+  if (heatpumpLevel === null || r0 === null || r1 === null || batteryCharging === null) {
+    return { a: null, b: null, c: null };
+  }
+
+  return projectBuildingCurrents({
+    heatpumpLevel,
+    wallboxMask: wallboxMaskFromRelays(r0, r1),
+    batteryCharging,
+  });
+});
 
 const measuredPowerFactors = computed(() => ({
   a: numberOrNull(_.energy_meter.measured.a_pf),
@@ -328,10 +380,21 @@ const branchAReady = computed(() => {
   return last !== null && performance.now() - last < 3000;
 });
 
-const controlReady = computed(() => measurementFresh.value && branchAReady.value);
+const branchBReady = computed(() => {
+  if (isSimulation.value) return true;
+  const payload = _.realFeedback.branchB.payload;
+  if (!payload) return false;
+  const state = String(payload.state ?? payload.safety?.state ?? '').toUpperCase();
+  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) return false;
+  const last = numberOrNull(_.realFeedback.branchB.lastUpdate);
+  return last !== null && performance.now() - last < 3000;
+});
+
+const controlReady = computed(() => measurementFresh.value && branchAReady.value && branchBReady.value);
 const controlBlockedReason = computed(() => {
   if (!measurementFresh.value) return 'Measurement data stale or unavailable';
   if (!branchAReady.value) return 'Waiting for Branch-A status or Branch-A is not ready';
+  if (!branchBReady.value) return 'Waiting for Branch-B status or Branch-B is not ready';
   return '';
 });
 
@@ -360,8 +423,6 @@ const heatpumpLevel = computed(() => {
   return level === null ? null : clampInt(level, 0, HEATPUMP_LEVELS);
 });
 
-const heatpumpMode = computed(() => _.heatpump.mode);
-
 const wallboxLevel = computed(() => {
   if (_.wallbox.r0 === null || _.wallbox.r1 === null) return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
   return (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
@@ -371,23 +432,13 @@ const batteryCharging = computed(() => (_.battery.charging === null ? null : _.b
 
 const agentDeviceStates = computed(() => ({
   heatpump: heatpumpLevel.value,
-  heatpumpMode: heatpumpMode.value,
   wallbox: wallboxLevel.value,
   batteryCharging: batteryCharging.value,
 }));
 
-const wallboxCurrentForLevel = level => {
-  const normalized = clampInt(level, 0, 3);
-  return (
-    ((normalized & 1) ? WALLBOX_R0_CURRENT : 0) +
-    ((normalized & 2) ? WALLBOX_R1_CURRENT : 0)
-  );
-};
-
-const heatpumpCurrentForLevel = level =>
-  clampInt(level, 0, 5) * (HEATPUMP_MAX_CURRENT / HEATPUMP_LEVELS);
-
-const batteryCurrentForState = charging => charging ? BATTERY_CHARGE_CURRENT : 0;
+const wallboxCurrentForLevel = level => wallboxProjectedCurrentA(level);
+const heatpumpCurrentForLevel = level => heatpumpProjectedCurrentA(level);
+const batteryCurrentForState = charging => batteryProjectedCurrentA(charging);
 
 const predictVufForDeviceState = candidate => {
   const currents = { ...projectedCurrents.value };
@@ -415,9 +466,7 @@ const predictVufForDeviceState = candidate => {
     neutralReactance: finiteNonNegative(_.grid.xNeutral),
   });
 
-  const total = numberOrNull(result?.vufPercent);
-  const baseline = baselineVuf.value;
-  return total === null || baseline === null ? null : Math.max(0, total - baseline);
+  return numberOrNull(result?.vufPercent);
 };
 
 const applyAgentDeviceState = state => {
@@ -425,7 +474,6 @@ const applyAgentDeviceState = state => {
 
   if (own(state, 'heatpump')) {
     const targetHeatpump = clampInt(state.heatpump, 0, HEATPUMP_LEVELS);
-    // P0-3 invariant: an AI/level patch of 0 means ZERO_HOLD (start,0), never STOP.
     sendHeatpumpCommand(levelToHeatpumpCommand(targetHeatpump));
   }
 
@@ -454,12 +502,8 @@ const calibrateCurrent = (value, offset) => {
   return n === null ? null : Math.max(0, n - offset);
 };
 
-const projectCurrent = (value, factor) => {
-  const n = numberOrNull(value);
-  return n === null ? null : n * factor;
-};
-
 const onEnergyMeter = payload => {
+  if (!payloadMatchesActiveMode(payload)) return;
   // Never mutate the Socket.IO/Shelly payload in place. Keep an auditable raw snapshot.
   const raw = { ...payload };
 
@@ -477,18 +521,18 @@ const onEnergyMeter = payload => {
     c_voltage: numberOrNull(raw.c_voltage),
   };
 
-  // Explicit Digital-Twin projection. These values are SCALED FROM MEASURED.
+  // Measurement truth stays small and unscaled. Building-scale current is
+  // derived separately from real/simulated device states via BuildingTwinModel.
   const simulatedInput = raw.simulation_mode === true || raw.source_type === 'simulated_sensor';
 
   measured.source_type = simulatedInput ? 'simulated_sensor' : 'measured';
 
   const projected = {
-    ...measured,
-    a_current: projectCurrent(measured.a_current, CURRENT_PROJECTION_FACTOR.a),
-    b_current: projectCurrent(measured.b_current, CURRENT_PROJECTION_FACTOR.b),
-    c_current: projectCurrent(measured.c_current, CURRENT_PROJECTION_FACTOR.c),
-    source_type: simulatedInput ? 'digital_twin_simulated' : 'scaled_from_measured',
-    projection_factor: { ...CURRENT_PROJECTION_FACTOR },
+    source_type: simulatedInput ? 'digital_twin_simulated' : 'digital_twin_from_real_state',
+    projection_model: 'equivalent_devices_v1',
+    base_current_a: { ...BUILDING_TWIN_CONFIG.baseCurrentA },
+    branchA_equivalent_heatpumps: BUILDING_TWIN_CONFIG.branchAEquivalentHeatpumps,
+    branchB_equivalent_wallboxes_per_relay: BUILDING_TWIN_CONFIG.branchBEquivalentWallboxesPerRelay,
   };
 
   Object.assign(_.energy_meter.raw, raw);
@@ -498,16 +542,19 @@ const onEnergyMeter = payload => {
 };
 
 const onBranchAAck = payload => {
+  if (!payloadMatchesActiveMode(payload)) return;
   _.realFeedback.branchA.ack = payload;
   _.realFeedback.branchA.ackUpdate = performance.now();
 };
 
 const onBranchBAck = payload => {
+  if (!payloadMatchesActiveMode(payload)) return;
   _.realFeedback.branchB.ack = payload;
   _.realFeedback.branchB.ackUpdate = performance.now();
 };
 
 const onBranchAStatus = payload => {
+  if (!payloadMatchesActiveMode(payload)) return;
   _.realFeedback.branchA.payload = payload;
   _.realFeedback.branchA.lastUpdate = performance.now();
 
@@ -523,39 +570,18 @@ const onBranchAStatus = payload => {
   );
   const rawLfrd = firstNumber(payload?.lfrd_reg8602, payload?.lfrd, payload?.vfd?.lfrd_reg8602);
 
-  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
-    _.heatpump.mode = 'stop';
+  if (['STOP', 'STOPPED', 'READY', 'SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
     _.heatpump.level = 0;
     return;
   }
-
-  if (['STOP', 'STOPPED', 'READY'].includes(state)) {
-    _.heatpump.mode = 'stop';
-    _.heatpump.level = 0;
-    return;
-  }
-
-  if (['ZERO_HOLD', 'RAMPING_TO_ZERO_HOLD'].includes(state)) {
-    _.heatpump.mode = 'zero_hold';
-    _.heatpump.level = 0;
-    return;
-  }
-
-  if (['RUNNING', 'STARTING'].includes(state)) _.heatpump.mode = 'start';
 
   if (explicitLevel !== null) {
     _.heatpump.level = clampInt(explicitLevel, 0, HEATPUMP_LEVELS);
-    if (_.heatpump.level > 0) _.heatpump.mode = 'start';
-    else if (_.heatpump.mode === null) _.heatpump.mode = 'zero_hold';
     return;
   }
 
   const level = frequencyHzToLevel(frequencyHz ?? (rawLfrd === null ? null : rawLfrd / 10));
-  if (level !== null) {
-    _.heatpump.level = level;
-    if (level > 0) _.heatpump.mode = 'start';
-    else if (_.heatpump.mode === null) _.heatpump.mode = 'zero_hold';
-  }
+  if (level !== null) _.heatpump.level = level;
 };
 
 const pickBool = (...values) => {
@@ -583,6 +609,7 @@ const readRelay = (payload, index) => {
 };
 
 const onBranchBStatus = payload => {
+  if (!payloadMatchesActiveMode(payload)) return;
   _.realFeedback.branchB.payload = payload;
   _.realFeedback.branchB.lastUpdate = performance.now();
   const r0 = readRelay(payload, 0);
@@ -593,6 +620,7 @@ const onBranchBStatus = payload => {
 };
 
 const onWallbox = data => {
+  if (!payloadMatchesActiveMode(data)) return;
   const output = boolOrNull(data?.output);
   if (data.id === 0 && output !== null) _.wallbox.r0 = output;
   else if (data.id === 1 && output !== null) _.wallbox.r1 = output;
@@ -603,6 +631,7 @@ const onWallbox = data => {
 };
 
 const onBattery = data => {
+  if (!payloadMatchesActiveMode(data)) return;
   const output = boolOrNull(data?.output);
   if (output !== null) _.battery.charging = output;
 };
@@ -624,10 +653,6 @@ const toggleWallbox = r => {
 
 const updateHeatpumpLoad = value => {
   sendHeatpumpCommand(levelToHeatpumpCommand(clampInt(value, 0, HEATPUMP_LEVELS)));
-};
-
-const requestHeatpumpStop = () => {
-  sendHeatpumpCommand(levelToHeatpumpCommand(0, 'stop'));
 };
 
 const requestHeatpumpZeroHold = () => {
@@ -697,8 +722,24 @@ const bindRuntime = () => {
   runtime.EspService?.requestUpdate?.();
 };
 
-const setRuntimeMode = mode => {
-  App.setMode(mode);
+const setRuntimeMode = async mode => {
+  if (!['simulation', 'real'].includes(mode) || mode === App._.mode || _.runtimeSwitching) return;
+
+  _.runtimeSwitching = true;
+  const outgoingRuntime = getRuntime();
+
+  try {
+    // Smallest and safest isolation strategy: shut down the outgoing runtime,
+    // discard its UI data, then bind a clean store to the incoming runtime.
+    await shutdownRuntimeDevices(outgoingRuntime);
+    unbindRuntime();
+    clearRuntimeData();
+
+    if (mode === 'simulation') SimulationRuntime.resetAllOff();
+    App.setMode(mode);
+  } finally {
+    _.runtimeSwitching = false;
+  }
 };
 
 const setSimulationScenario = name => {
@@ -769,14 +810,14 @@ onUnmounted(() => {
         <button
           type="button"
           :class="{ selected: isSimulation }"
-          @click="setRuntimeMode('simulation')"
+          :disabled="_.runtimeSwitching" @click="setRuntimeMode('simulation')"
         >
           SIMULATION
         </button>
         <button
           type="button"
           :class="{ selected: !isSimulation }"
-          @click="setRuntimeMode('real')"
+          :disabled="_.runtimeSwitching" @click="setRuntimeMode('real')"
         >
           REAL HARDWARE
         </button>
@@ -805,13 +846,13 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div v-if="isSimulation" class="grid-impedance-panel">
+    <div class="grid-impedance-panel">
       <div class="grid-panel-head">
         <div>
           <strong>Senergate Grid Impedance / Netzimpedanz / 电网阻抗</strong>
           <p>
-            MODELED simulation parameters. VUF remains ESTIMATED. These values are not measured/calibrated site data.
-            / 仅用于模型仿真；VUF 仍为 ESTIMATED，这些参数不是当前现场实测/校准值。
+            MODELED building-scale parameters used in both REAL and SIMULATION. VUF remains ESTIMATED; these are not measured/calibrated site data.
+            / REAL 与 SIMULATION 共用的建筑级模型参数；VUF 仍为 ESTIMATED，这些参数不是现场实测/校准值。
           </p>
         </div>
         <span class="grid-provenance">{{ _.grid.provenance.toUpperCase() }}</span>
@@ -849,6 +890,8 @@ onUnmounted(() => {
         <span>|Z<sub>N</sub>| = {{ formatNullableNumber(neutralImpedanceMagnitude, 3, ' Ω') }}</span>
         <span>|V<sub>N</sub>| = {{ neutralVoltageDropMagnitude !== null ? `${neutralVoltageDropMagnitude.toFixed(2)} V` : '--' }}</span>
         <span>Model: V<sub>LN</sub> = E − Z<sub>phase</sub>I − Z<sub>N</sub>I<sub>N</sub></span>
+        <span>Branch A: 1 motor → 3 HP</span>
+        <span>Branch B: 1 relay → 2 WB · 2 relays → 4 WB</span>
       </div>
     </div>
 
@@ -869,14 +912,14 @@ onUnmounted(() => {
 
     <div class="agent-section">
       <AgentCard
-        :vuf="loadImpactVuf"
+        :key="App._.mode"
+        :vuf="currentVuf"
         :device-states="agentDeviceStates"
         :predict-vuf="predictVufForDeviceState"
         :control-ready="controlReady"
         :control-blocked-reason="controlBlockedReason"
         :command-feedback="commandFeedback"
         @apply-state="applyAgentDeviceState"
-        @heatpump-stop="requestHeatpumpStop"
         @heatpump-zero-hold="requestHeatpumpZeroHold"
         @enabled-change="onAgentEnabledChange"
       />

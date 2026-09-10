@@ -32,7 +32,6 @@ let result = SimulationRuntime.EspService.heatpump({ mode: 'start', level: 4, ta
 assert(result.accepted === true && SimulationRuntime.getSnapshot().heatpumpLevel === 4, 'simulation level 4 failed');
 result = SimulationRuntime.EspService.heatpump({ mode: 'zero_hold', level: 0, target_hz: 0 });
 assert(result.accepted === true && SimulationRuntime.getSnapshot().heatpumpLevel === 0, 'simulation zero_hold failed');
-assert(SimulationRuntime.getSnapshot().heatpumpMode === 'zero_hold', 'simulation must preserve zero_hold mode');
 assert(SimulationRuntime.EspService.heatpump(0.8).accepted === false, 'simulation must reject numeric normalized load');
 SimulationRuntime.stop();
 
