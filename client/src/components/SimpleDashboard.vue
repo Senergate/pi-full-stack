@@ -369,6 +369,23 @@ const startupChecklist = computed(() => ({
 
 const startupAllReady = computed(() => Object.values(startupChecklist.value).every(Boolean));
 
+// Runtime values may arrive quickly from MQTT/Shelly/ESP32 during startup, but
+// the dashboard must stay visually fail-closed until the complete startup
+// checklist has passed. Model configuration values (grid impedance, assumed
+// phase angles) are not runtime measurements and remain visible.
+const startupDataVisible = computed(() => _.startup.phase === 'ready' && startupAllReady.value);
+
+const startupNullPhases = Object.freeze({ a: null, b: null, c: null });
+const displayProjectedCurrents = computed(() =>
+  startupDataVisible.value ? projectedCurrents.value : startupNullPhases
+);
+const displayPhasorVoltages = computed(() =>
+  startupDataVisible.value ? loadVoltagesForPhasor.value : startupNullPhases
+);
+const displayCurrentVuf = computed(() => startupDataVisible.value ? currentVuf.value : null);
+const displayBaselineVuf = computed(() => startupDataVisible.value ? baselineVuf.value : null);
+const displayLoadImpactVuf = computed(() => startupDataVisible.value ? loadImpactVuf.value : null);
+
 const startupActiveDevices = computed(() => {
   const active = [];
   if ((heatpumpLevel.value ?? 0) > 0 || ['STARTING', 'RUNNING', 'RAMPING_TO_ZERO_HOLD'].includes(branchAState.value)) active.push('Branch A / Heat pump');
@@ -957,22 +974,22 @@ onUnmounted(() => {
 
     <div class="overview-grid">
       <CurrentCard
-        :currents="projectedCurrents"
+        :currents="displayProjectedCurrents"
         :y-range="currentYRange"
         :source-label="currentSourceLabel"
       />
 
       <PhasorCard
-        :voltages="loadVoltagesForPhasor"
+        :voltages="displayPhasorVoltages"
         :angles="_.vuf.sourceAngle"
       />
 
-      <VufCard :vuf="currentVuf" :baseline-vuf="baselineVuf" :load-impact-vuf="loadImpactVuf" />
+      <VufCard :vuf="displayCurrentVuf" :baseline-vuf="displayBaselineVuf" :load-impact-vuf="displayLoadImpactVuf" />
     </div>
 
     <div class="agent-section">
       <AgentCard
-        :vuf="currentVuf"
+        :vuf="displayCurrentVuf"
         :device-states="agentDeviceStates"
         :predict-vuf="predictVufForDeviceState"
         :control-ready="controlReady"

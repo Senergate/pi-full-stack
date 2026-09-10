@@ -230,3 +230,13 @@ vue_import_usage_static_test.mjs         PASS
 Zusätzlich wurden die geänderten JS- und Vue-`<script setup>`-Blöcke mit `node --check` geprüft: PASS.
 
 **Hinweis / 注意:** Ein kompletter Vite-Build konnte in dieser Arbeitsumgebung nicht abgeschlossen werden, weil `npm ci` die Frontend-Abhängigkeiten nicht vollständig installieren konnte. Der Quellcode und die projektspezifischen Tests wurden jedoch geprüft. Auf dem Pi5 bitte nach `npm ci` noch `npm run build` ausführen.
+
+## Startup display correction / 启动显示修正
+
+**DE:** Runtime-Daten können kurz nach dem Socket-/MQTT-Bind bereits eintreffen. Damit die Oberfläche während der laufenden Initialprüfung trotzdem eindeutig fail-closed bleibt, werden Current/Phasor/VUF-Werte bis `startup.phase === 'ready'` visuell als `— / NO DATA` ausgeblendet. Die Daten dürfen intern bereits empfangen werden; sichtbar werden sie erst nach vollständigem Startup-Check.
+
+**中文：** Socket/MQTT 绑定后，真实状态可能很快到达。为了让初始化检查阶段在界面上仍保持明确的 fail-closed 行为，Current / Phasor / VUF 在 `startup.phase === 'ready'` 之前统一显示为 `— / NO DATA`。后台可以先收到真实数据，但必须在完整 Startup Check 通过后才显示。
+
+Zusätzlich wurde `PhasorCard.vue` korrigiert: `Number(null) === 0` darf fehlende Spannung nicht in `0 V` oder einen Fallback-Zeiger umwandeln. / 同时修复 `PhasorCard.vue`：禁止利用 `Number(null) === 0` 把缺失电压错误转换成 `0 V` 或默认相量。
+
+**Nicht auf null gesetzt / 不清零:** Grid-Impedanz-Preset und angenommene Phasenwinkel bleiben sichtbar, weil sie MODELED-Konfiguration und keine Runtime-Messwerte sind. / Grid Impedance preset 与假设相角属于 MODELED 配置，不是实时测量值，因此保持可见。
