@@ -4,7 +4,7 @@ const dashboard = fs.readFileSync(new URL('../client/src/components/SimpleDashbo
 const phasor = fs.readFileSync(new URL('../client/src/components/PhasorCard.vue', import.meta.url), 'utf8');
 
 for (const marker of [
-  "const startupDataVisible = computed(() => _.startup.phase === 'ready' && startupAllReady.value)",
+  "const startupDataVisible = computed(() => _.startup.phase === 'ready' && startupCoreReady.value)",
   ':currents="displayProjectedCurrents"',
   ':voltages="displayPhasorVoltages"',
   ':vuf="displayCurrentVuf"',

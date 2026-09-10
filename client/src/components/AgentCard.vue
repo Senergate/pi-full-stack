@@ -167,6 +167,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 const CRITICAL_VUF = 2.0;
 const SETTLE_TIME_MS = 5000;
 const TICK_MS = 250;
+const COMMAND_PENDING_TIMEOUT_MS = 3000;
 const MIN_IMPROVEMENT = 0.01;
 const MAX_HEATPUMP = 5;
 const MAX_WALLBOX = 3;
@@ -196,6 +197,7 @@ const logId = ref(0);
 
 const pendingDevices = reactive({ heatpump: false, wallbox: false, batteryCharging: false });
 const pendingTargetState = reactive({ heatpump: null, wallbox: null, batteryCharging: null });
+const pendingSince = reactive({ heatpump: null, wallbox: null, batteryCharging: null });
 
 const clampInt = (value, min, max) => {
   if (value === null || value === undefined || value === '') return null;
@@ -262,21 +264,37 @@ const latestFeedbackLines = computed(() => {
   };
 });
 
+const clearPending = key => {
+  pendingDevices[key] = false;
+  pendingTargetState[key] = null;
+  pendingSince[key] = null;
+};
+
 const markPending = patch => {
   const current = normalizedDeviceStates.value;
+  const startedAt = Date.now();
   for (const key of Object.keys(pendingDevices)) {
     if (!Object.hasOwn(patch, key)) continue;
     pendingDevices[key] = patch[key] !== current[key];
     pendingTargetState[key] = pendingDevices[key] ? patch[key] : null;
+    pendingSince[key] = pendingDevices[key] ? startedAt : null;
+  }
+};
+
+const expirePendingCommands = () => {
+  const currentTime = Date.now();
+  for (const key of Object.keys(pendingDevices)) {
+    if (!pendingDevices[key] || pendingSince[key] === null) continue;
+    if (currentTime - pendingSince[key] < COMMAND_PENDING_TIMEOUT_MS) continue;
+    const target = pendingTargetState[key];
+    clearPending(key);
+    addLog('Command confirmation timeout', `${key} target ${String(target)} was not confirmed within 3 s. Pending was released; execution was NOT assumed successful.`, 'warning');
   }
 };
 
 watch(normalizedDeviceStates, current => {
   for (const key of Object.keys(pendingDevices)) {
-    if (pendingDevices[key] && current[key] === pendingTargetState[key]) {
-      pendingDevices[key] = false;
-      pendingTargetState[key] = null;
-    }
+    if (pendingDevices[key] && current[key] === pendingTargetState[key]) clearPending(key);
   }
 }, { deep: true });
 
@@ -434,6 +452,7 @@ const selectAndApplyState = async repeatedViolation => {
 
 const evaluateAgent = async () => {
   now.value = Date.now();
+  expirePendingCommands();
   if (!autoEnabled.value || evaluating.value) return;
   if (!props.controlReady) {
     agentState.value = 'blocked';

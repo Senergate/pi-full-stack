@@ -4,11 +4,8 @@ import { computed, onMounted, onUnmounted, reactive, watch } from 'vue';
 import App from '../App.js';
 import {
   BUILDING_TWIN_CONFIG,
-  batteryProjectedCurrentA,
-  heatpumpProjectedCurrentA,
   projectBuildingCurrents,
   wallboxMaskFromRelays,
-  wallboxProjectedCurrentA,
 } from '../BuildingTwinModel.js';
 import PhasorCalculator from './PhasorCalculator.js';
 import VufCard from './VufCard.vue';
@@ -38,6 +35,7 @@ const GRID_IMPEDANCE_PRESETS = {
     xPhase: 0.01,
     rNeutral: 0.02,
     xNeutral: 0.005,
+    provenance: 'generic_reference_only',
   },
   typical: {
     label: 'Typical Building Feeder',
@@ -45,6 +43,7 @@ const GRID_IMPEDANCE_PRESETS = {
     xPhase: 0.03,
     rNeutral: 0.06,
     xNeutral: 0.02,
+    provenance: 'generic_reference_only',
   },
   weak: {
     label: 'Weak Feeder',
@@ -52,6 +51,15 @@ const GRID_IMPEDANCE_PRESETS = {
     xPhase: 0.05,
     rNeutral: 0.10,
     xNeutral: 0.03,
+    provenance: 'generic_reference_only',
+  },
+  demo: {
+    label: 'Demo Feeder · Building Twin',
+    rPhase: 0.40,
+    xPhase: 0.15,
+    rNeutral: 0.30,
+    xNeutral: 0.10,
+    provenance: 'modeled_demo_feeder_not_site_calibrated',
   },
 };
 
@@ -78,12 +86,12 @@ const _ = reactive({
     sourceAngle: { a: 0, b: -120, c: 120 },
   },
   grid: {
-    preset: 'typical',
-    rPhase: GRID_IMPEDANCE_PRESETS.typical.rPhase,
-    xPhase: GRID_IMPEDANCE_PRESETS.typical.xPhase,
-    rNeutral: GRID_IMPEDANCE_PRESETS.typical.rNeutral,
-    xNeutral: GRID_IMPEDANCE_PRESETS.typical.xNeutral,
-    provenance: 'modeled',
+    preset: 'demo',
+    rPhase: GRID_IMPEDANCE_PRESETS.demo.rPhase,
+    xPhase: GRID_IMPEDANCE_PRESETS.demo.xPhase,
+    rNeutral: GRID_IMPEDANCE_PRESETS.demo.rNeutral,
+    xNeutral: GRID_IMPEDANCE_PRESETS.demo.xNeutral,
+    provenance: GRID_IMPEDANCE_PRESETS.demo.provenance,
   },
   agent: { enabled: false },
   mqtt: { connected: false, lastHeartbeatAt: null },
@@ -197,7 +205,7 @@ const setGridPreset = key => {
   _.grid.xPhase = preset.xPhase;
   _.grid.rNeutral = preset.rNeutral;
   _.grid.xNeutral = preset.xNeutral;
-  _.grid.provenance = 'modeled';
+  _.grid.provenance = preset.provenance ?? 'modeled';
 };
 
 const phaseResistance = computed(() => {
@@ -239,13 +247,13 @@ const measuredCurrents = computed(() => ({
 
 const projectedCurrents = computed(() => {
   const heatpumpLevel = numberOrNull(_.heatpump.level);
-  if (heatpumpLevel === null || _.wallbox.r0 === null || _.wallbox.r1 === null || _.battery.charging === null) {
-    return { a: null, b: null, c: null };
-  }
+  const wallboxMask = (_.wallbox.r0 === null || _.wallbox.r1 === null)
+    ? null
+    : wallboxMaskFromRelays(_.wallbox.r0, _.wallbox.r1);
 
   return projectBuildingCurrents({
     heatpumpLevel,
-    wallboxMask: wallboxMaskFromRelays(_.wallbox.r0, _.wallbox.r1),
+    wallboxMask,
     batteryCharging: _.battery.charging,
   });
 });
@@ -370,13 +378,20 @@ const startupChecklist = computed(() => ({
   battery: startupRequestReceived(_.battery.lastUpdate) && _.battery.charging !== null,
 }));
 
+const startupCoreReady = computed(() =>
+  startupChecklist.value.socket &&
+  startupChecklist.value.services &&
+  startupChecklist.value.mqtt &&
+  startupChecklist.value.measurement &&
+  startupChecklist.value.branchA
+);
+
 const startupAllReady = computed(() => Object.values(startupChecklist.value).every(Boolean));
 
-// Runtime values may arrive quickly from MQTT/Shelly/ESP32 during startup, but
-// the dashboard must stay visually fail-closed until the complete startup
-// checklist has passed. Model configuration values (grid impedance, assumed
-// phase angles) are not runtime measurements and remain visible.
-const startupDataVisible = computed(() => _.startup.phase === 'ready' && startupAllReady.value);
+// Branch B and Battery are checked and displayed, but they must not hold the
+// whole dashboard hostage. The previous working control path only required
+// fresh measurement data plus Branch-A readiness for general operation.
+const startupDataVisible = computed(() => _.startup.phase === 'ready' && startupCoreReady.value);
 
 const startupNullPhases = Object.freeze({ a: null, b: null, c: null });
 const displayProjectedCurrents = computed(() =>
@@ -407,15 +422,11 @@ const startupStatusLabel = computed(() => {
   return 'CONNECTING';
 });
 
-const controlReady = computed(() =>
-  _.startup.phase === 'ready' && measurementFresh.value && branchAReady.value && branchBReady.value
-);
+const controlReady = computed(() => measurementFresh.value && branchAReady.value);
 
 const controlBlockedReason = computed(() => {
-  if (_.startup.phase !== 'ready') return `Startup initialization not complete: ${startupStatusLabel.value}`;
   if (!measurementFresh.value) return 'Measurement data stale or unavailable';
-  if (!branchAReady.value) return 'Branch-A status stale or Branch-A is not ready';
-  if (!branchBReady.value) return 'Branch-B Shelly relay status stale or relay state is unknown';
+  if (!branchAReady.value) return 'Waiting for Branch-A status or Branch-A is not ready';
   return '';
 });
 
@@ -459,24 +470,14 @@ const agentDeviceStates = computed(() => ({
   batteryCharging: batteryCharging.value,
 }));
 
-const wallboxCurrentForLevel = level => wallboxProjectedCurrentA(level);
-const heatpumpCurrentForLevel = level => heatpumpProjectedCurrentA(level);
-const batteryCurrentForState = charging => batteryProjectedCurrentA(charging);
-
 const predictVufForDeviceState = candidate => {
-  const currents = { ...projectedCurrents.value };
-  const currentState = agentDeviceStates.value;
+  const currents = projectBuildingCurrents({
+    heatpumpLevel: candidate.heatpump,
+    wallboxMask: candidate.wallbox,
+    batteryCharging: candidate.batteryCharging,
+  });
 
   if ([currents.a, currents.b, currents.c].some(value => value === null)) return null;
-  if ([currentState.heatpump, currentState.wallbox, currentState.batteryCharging].some(value => value === null)) return null;
-
-  currents.a += heatpumpCurrentForLevel(candidate.heatpump) - heatpumpCurrentForLevel(currentState.heatpump);
-  currents.b += wallboxCurrentForLevel(candidate.wallbox) - wallboxCurrentForLevel(currentState.wallbox);
-  currents.c += batteryCurrentForState(candidate.batteryCharging) - batteryCurrentForState(currentState.batteryCharging);
-
-  currents.a = Math.max(0, currents.a);
-  currents.b = Math.max(0, currents.b);
-  currents.c = Math.max(0, currents.c);
 
   const result = PhasorCalculator.analyzeVUF({
     currents,
@@ -506,10 +507,11 @@ const applyAgentDeviceState = state => {
     const targetR0 = (targetWallbox & 1) !== 0;
     const targetR1 = (targetWallbox & 2) !== 0;
 
-    _.wallbox.r0 = null;
-    _.wallbox.r1 = null;
-    runtime.WallboxService.set(0, targetR0);
-    runtime.WallboxService.set(1, targetR1);
+    // Keep the last confirmed Shelly state visible while a new command is in
+    // flight. Do not set r0/r1 to null: that used to invalidate the global
+    // control gate until the next (sometimes >10 s delayed) Shelly status.
+    if (_.wallbox.r0 !== targetR0) runtime.WallboxService.set(0, targetR0);
+    if (_.wallbox.r1 !== targetR1) runtime.WallboxService.set(1, targetR1);
   }
 
   if (own(state, 'batteryCharging')) {
@@ -552,6 +554,7 @@ const onEnergyMeter = payload => {
     source_type: 'digital_twin_from_real_state',
     projection_model: 'equivalent_devices_v1',
     base_current_a: { ...BUILDING_TWIN_CONFIG.baseCurrentA },
+    model_provenance: BUILDING_TWIN_CONFIG.provenance,
     branchA_equivalent_heatpumps: BUILDING_TWIN_CONFIG.branchAEquivalentHeatpumps,
     branchB_equivalent_wallboxes_per_relay: BUILDING_TWIN_CONFIG.branchBEquivalentWallboxesPerRelay,
   };
@@ -641,14 +644,12 @@ const toggleWallbox = r => {
   if (r === 0) {
     if (_.wallbox.r0 === null) return;
     const state = !_.wallbox.r0;
-    _.wallbox.r0 = null;
     App.WallboxService.set(0, state);
     return;
   }
 
   if (_.wallbox.r1 === null) return;
   const state = !_.wallbox.r1;
-  _.wallbox.r1 = null;
   App.WallboxService.set(1, state);
 };
 
@@ -706,12 +707,18 @@ const updateStartupPhase = () => {
     return;
   }
 
-  if (startupAllReady.value) {
+  if (startupCoreReady.value) {
     _.startup.phase = 'ready';
     _.startup.completedAt = performance.now();
+    const optionalMissing = [
+      !startupChecklist.value.branchB ? 'Branch B' : null,
+      !startupChecklist.value.battery ? 'Battery' : null,
+    ].filter(Boolean);
     _.startup.message = startupActiveDevices.value.length > 0
-      ? `Initialization complete. Existing active hardware detected: ${startupActiveDevices.value.join(', ')}. No automatic STOP was sent.`
-      : 'Initialization complete. All required real-hardware states are known.';
+      ? `Core initialization complete. Existing active hardware detected: ${startupActiveDevices.value.join(', ')}. No automatic STOP was sent.`
+      : optionalMissing.length > 0
+        ? `Core initialization complete. Optional status still pending: ${optionalMissing.join(', ')}.`
+        : 'Initialization complete. Real-hardware states are known.';
     clearStartupTimer();
   }
 };
@@ -760,17 +767,15 @@ const requestInitialHardwareState = async () => {
   }
 
   updateStartupPhase();
-  if (startupAllReady.value) return;
+  if (startupCoreReady.value) return;
 
   startupTimer = window.setTimeout(() => {
-    if (startupAllReady.value) return;
+    if (startupCoreReady.value) return;
     _.startup.phase = 'timeout';
     _.startup.timeoutAt = performance.now();
-    const missing = Object.entries(startupChecklist.value)
-      .filter(([, ready]) => !ready)
-      .map(([name]) => name)
-      .join(', ');
-    _.startup.message = `Initialization timed out. Missing/faulted: ${missing || 'unknown'}. Controls remain blocked.`;
+    const required = ['socket', 'services', 'mqtt', 'measurement', 'branchA'];
+    const missing = required.filter(name => !startupChecklist.value[name]).join(', ');
+    _.startup.message = `Initialization timed out. Missing/faulted core: ${missing || 'unknown'}.`;
   }, STARTUP_TIMEOUT_MS);
 };
 
@@ -902,8 +907,8 @@ onUnmounted(() => {
         <div>
           <strong>Senergate Grid Impedance / Netzimpedanz / 电网阻抗</strong>
           <p>
-            MODELED building-scale parameters for REAL HARDWARE. VUF remains ESTIMATED; these are not measured/calibrated site data.
-            / REAL HARDWARE 使用的建筑级模型参数；VUF 仍为 ESTIMATED，这些参数不是现场实测/校准值。
+            MODELED building-scale feeder parameters for REAL HARDWARE. The Demo Feeder is deliberately a transparent, non-site-calibrated scenario used to make the prototype VUF response visible.
+            / REAL HARDWARE 使用建筑级馈线模型。Demo Feeder 是明确标注、未经现场标定的演示场景，用于让小功率 Prototype 的 VUF 响应可见。
           </p>
         </div>
         <span class="grid-provenance">{{ _.grid.provenance.toUpperCase() }}</span>
@@ -914,6 +919,7 @@ onUnmounted(() => {
         <button type="button" :class="{ selected: _.grid.preset === 'stiff' }" @click="setGridPreset('stiff')">Stiff LV</button>
         <button type="button" :class="{ selected: _.grid.preset === 'typical' }" @click="setGridPreset('typical')">Typical Feeder</button>
         <button type="button" :class="{ selected: _.grid.preset === 'weak' }" @click="setGridPreset('weak')">Weak Feeder</button>
+        <button type="button" :class="{ selected: _.grid.preset === 'demo' }" @click="setGridPreset('demo')">Demo Feeder</button>
         <span class="grid-name">{{ gridPresetLabel }}</span>
       </div>
 

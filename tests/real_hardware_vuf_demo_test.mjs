@@ -6,27 +6,23 @@ function assert(condition, message) { if (!condition) throw new Error(message); 
 const common = {
   powerFactors: { a: 0.96, b: 0.98, c: 0.97 },
   sourceVoltages: { a: 230, b: 230, c: 230 },
-  sourceAngles: { a: 0, b: -120.2, c: 119.8 },
-  resistance: { a: 0.08, b: 0.08, c: 0.08 },
-  reactance: { a: 0.03, b: 0.03, c: 0.03 },
-  neutralResistance: 0.06,
-  neutralReactance: 0.02,
+  sourceAngles: { a: 0, b: -120, c: 120 },
+  resistance: { a: 0.40, b: 0.40, c: 0.40 },
+  reactance: { a: 0.15, b: 0.15, c: 0.15 },
+  neutralResistance: 0.30,
+  neutralReactance: 0.10,
 };
 
 const vuf = currents => PhasorCalculator.analyzeVUF({ currents, ...common }).vufPercent;
-const start = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 0, batteryCharging: false });
-const oneRelay = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 1, batteryCharging: false });
-const twoRelays = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 3, batteryCharging: false });
+const idle = projectBuildingCurrents({ heatpumpLevel: 0, wallboxMask: 0, batteryCharging: false });
+const branchA = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 0, batteryCharging: false });
+const compensated = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 1, batteryCharging: true });
 
-const startVuf = vuf(start);
-const oneRelayVuf = vuf(oneRelay);
-const twoRelaysVuf = vuf(twoRelays);
-
-assert(startVuf > 2.0, `Branch-A demo start must exceed 2% VUF, got ${startVuf}`);
-assert(oneRelayVuf < startVuf, 'First Branch-B relay must improve VUF.');
-assert(twoRelaysVuf < 2.0, `Four equivalent wallboxes must bring nominal demo VUF below 2%, got ${twoRelaysVuf}`);
+assert(idle.a === 0 && idle.b === 0 && idle.c === 0, 'Idle projected currents must be zero.');
+assert(vuf(branchA) > 2.0, `Demo feeder + equivalent Branch A must demonstrate >2% modeled VUF, got ${vuf(branchA)}`);
+assert(vuf(compensated) < 1.0, `Branch B + battery compensation should strongly reduce modeled VUF, got ${vuf(compensated)}`);
 
 console.log('real_hardware_vuf_demo_test: PASS');
-console.log(`start 275/100/100 A -> ${startVuf.toFixed(3)} %`);
-console.log(`relay0 275/132/100 A -> ${oneRelayVuf.toFixed(3)} %`);
-console.log(`relay0+1 275/164/100 A -> ${twoRelaysVuf.toFixed(3)} %`);
+console.log(`idle -> ${JSON.stringify(idle)}`);
+console.log(`Branch A full -> ${JSON.stringify(branchA)}, VUF=${vuf(branchA).toFixed(3)}%`);
+console.log(`Branch B R0 + battery -> ${JSON.stringify(compensated)}, VUF=${vuf(compensated).toFixed(3)}%`);

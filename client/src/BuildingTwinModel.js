@@ -1,27 +1,37 @@
 /*
- * Senergate building-scale Digital Twin mapping for REAL HARDWARE.
+ * Senergate REAL-HARDWARE building-scale equivalent-device model
+ * ----------------------------------------------------------------
+ * Measurement truth and model truth are deliberately separated:
+ *   - Shelly currents remain physical prototype measurements.
+ *   - Building-Twin currents are derived only from confirmed actuator states.
+ *   - No per-phase measured-current gain is used.
  *
- * Measurement truth stays in the Shelly/Pico layer. This module maps the
- * confirmed real actuator state to a documented building-scale equivalent:
+ * Prototype equivalence:
  *   Branch A: 1 ATV12 + motor  -> 3 equivalent heat pumps
  *   Branch B: 1 relay/resistor -> 2 equivalent wallboxes
  *             2 relays         -> 4 equivalent wallboxes
  *
- * The resulting currents are MODELED / ESTIMATED and must never be labelled
- * as measured PCC current.
+ * The current values below are DEMO DEVICE-MODEL assumptions. They are not
+ * measured site currents and should later be replaced by nameplate/validated
+ * load curves when those are available.
  */
 
 export const BUILDING_TWIN_CONFIG = Object.freeze({
-  baseCurrentA: Object.freeze({ a: 240, b: 100, c: 100 }),
+  baseCurrentA: Object.freeze({ a: 0, b: 0, c: 0 }),
 
   branchAEquivalentHeatpumps: 3,
-  branchAAggregateMaxCurrentA: 35,
   heatpumpLevels: 5,
+  // Aggregate building-scale contribution of the 3 equivalent heat pumps.
+  heatpumpAggregateMaxCurrentA: 35,
 
   branchBEquivalentWallboxesPerRelay: 2,
+  // Single-phase modeled current per equivalent wallbox.
   wallboxCurrentPerDeviceA: 16,
 
+  // Independent modeled contribution for the current battery prototype state.
   batteryChargeCurrentA: 20,
+
+  provenance: 'demo_equivalent_device_model_v2',
 });
 
 const clampInt = (value, min, max) => {
@@ -34,31 +44,42 @@ export const wallboxMaskFromRelays = (r0, r1) =>
 
 export const heatpumpProjectedCurrentA = level => {
   const safeLevel = clampInt(level, 0, BUILDING_TWIN_CONFIG.heatpumpLevels);
-  const loadRatio = safeLevel / BUILDING_TWIN_CONFIG.heatpumpLevels;
-  return BUILDING_TWIN_CONFIG.branchAAggregateMaxCurrentA * loadRatio;
+  return safeLevel * (
+    BUILDING_TWIN_CONFIG.heatpumpAggregateMaxCurrentA /
+    BUILDING_TWIN_CONFIG.heatpumpLevels
+  );
 };
 
 export const wallboxProjectedCurrentA = mask => {
   const safeMask = clampInt(mask, 0, 3);
   const activeRelays = ((safeMask & 1) ? 1 : 0) + ((safeMask & 2) ? 1 : 0);
-  const equivalentDevices =
+  const equivalentWallboxes =
     activeRelays * BUILDING_TWIN_CONFIG.branchBEquivalentWallboxesPerRelay;
-  return equivalentDevices * BUILDING_TWIN_CONFIG.wallboxCurrentPerDeviceA;
+  return equivalentWallboxes * BUILDING_TWIN_CONFIG.wallboxCurrentPerDeviceA;
 };
 
 export const batteryProjectedCurrentA = charging =>
   charging === true ? BUILDING_TWIN_CONFIG.batteryChargeCurrentA : 0;
 
 export const projectBuildingCurrents = ({
-  heatpumpLevel = 0,
-  wallboxMask = 0,
-  batteryCharging = false,
-  baseCurrentA = BUILDING_TWIN_CONFIG.baseCurrentA,
-} = {}) => ({
-  a: Number(baseCurrentA.a) + heatpumpProjectedCurrentA(heatpumpLevel),
-  b: Number(baseCurrentA.b) + wallboxProjectedCurrentA(wallboxMask),
-  c: Number(baseCurrentA.c) + batteryProjectedCurrentA(batteryCharging),
-});
+  heatpumpLevel,
+  wallboxMask,
+  batteryCharging,
+} = {}) => {
+  const hpKnown = heatpumpLevel !== null && heatpumpLevel !== undefined;
+  const wbKnown = wallboxMask !== null && wallboxMask !== undefined;
+  const batteryKnown = batteryCharging !== null && batteryCharging !== undefined;
+
+  if (!hpKnown || !wbKnown || !batteryKnown) {
+    return { a: null, b: null, c: null };
+  }
+
+  return {
+    a: BUILDING_TWIN_CONFIG.baseCurrentA.a + heatpumpProjectedCurrentA(heatpumpLevel),
+    b: BUILDING_TWIN_CONFIG.baseCurrentA.b + wallboxProjectedCurrentA(wallboxMask),
+    c: BUILDING_TWIN_CONFIG.baseCurrentA.c + batteryProjectedCurrentA(batteryCharging),
+  };
+};
 
 export default {
   BUILDING_TWIN_CONFIG,
