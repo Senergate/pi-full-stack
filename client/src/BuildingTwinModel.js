@@ -7,7 +7,7 @@
  *   - No per-phase measured-current gain is used.
  *
  * Prototype equivalence:
- *   Branch A: 1 ATV12 + motor  -> 3 equivalent heat pumps
+ *   Branch A: 1 ATV12 + motor  -> 2 equivalent heat-pump modules
  *   Branch B: 1 relay/resistor -> 2 equivalent wallboxes
  *             2 relays         -> 4 equivalent wallboxes
  *
@@ -19,19 +19,19 @@
 export const BUILDING_TWIN_CONFIG = Object.freeze({
   baseCurrentA: Object.freeze({ a: 0, b: 0, c: 0 }),
 
-  branchAEquivalentHeatpumps: 3,
+  branchAEquivalentHeatpumps: 2,
   heatpumpLevels: 5,
-  // Aggregate building-scale contribution of the 3 equivalent heat pumps.
-  heatpumpAggregateMaxCurrentA: 35,
+  // Aggregate building-scale contribution of the 2 equivalent heat-pump modules.
+  heatpumpAggregateMaxCurrentA: 40,
 
   branchBEquivalentWallboxesPerRelay: 2,
   // Single-phase modeled current per equivalent wallbox.
   wallboxCurrentPerDeviceA: 16,
 
   // Independent modeled contribution for the current battery prototype state.
-  batteryChargeCurrentA: 20,
+  batteryChargeCurrentA: 40,
 
-  provenance: 'demo_equivalent_device_model_v2',
+  provenance: 'demo_equivalent_device_model_v3_40_64_40',
 });
 
 const clampInt = (value, min, max) => {

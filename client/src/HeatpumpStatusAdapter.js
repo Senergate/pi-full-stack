@@ -55,6 +55,14 @@ const commandLevel = commanded => {
   return frequencyHzToHeatpumpLevel(commandTargetHz(commanded));
 };
 
+export const heatpumpCommandToTwinLevel = commanded => {
+  if (!commanded) return null;
+  const mode = String(commanded.mode ?? '').toLowerCase();
+  if (mode === 'stop' || mode === 'zero_hold') return 0;
+  if (mode !== 'start') return null;
+  return commandLevel(commanded);
+};
+
 const normalizeModeFromState = state => {
   if (['STOP', 'STOPPED', 'READY', 'SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) return 'stop';
   if (['ZERO_HOLD', 'RAMPING_TO_ZERO_HOLD'].includes(state)) return 'zero_hold';
@@ -213,5 +221,6 @@ export const deriveHeatpumpStatus = (payload, commanded = null) => {
 
 export default {
   frequencyHzToHeatpumpLevel,
+  heatpumpCommandToTwinLevel,
   deriveHeatpumpStatus,
 };

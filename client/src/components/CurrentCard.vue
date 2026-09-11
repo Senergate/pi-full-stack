@@ -2,13 +2,33 @@
   <section class="current-card">
     <div class="card-header">
       <div>
-        <div class="eyebrow">{{ sourceLabel }}</div>
+        <div class="eyebrow">SHELLY · MEASURED + BUILDING TWIN · MODELED</div>
         <h2>Phase Currents</h2>
       </div>
 
       <span class="badge">
         {{ yRange.min }}–{{ yRange.max }} A
       </span>
+    </div>
+
+    <div class="measured-strip">
+      <div class="measured-copy">
+        <strong>SHELLY · MEASURED</strong>
+        <small>physical prototype current / 原型实测电流</small>
+      </div>
+      <div
+        v-for="phase in measuredPhases"
+        :key="`measured-${phase.key}`"
+        class="measured-phase"
+      >
+        <span>{{ phase.label }}</span>
+        <strong>{{ formatMeasuredCurrent(phase.current) }} A</strong>
+      </div>
+    </div>
+
+    <div class="model-heading">
+      <span>{{ sourceLabel }}</span>
+      <strong>BUILDING TWIN · MODELED · 0–100 A</strong>
     </div>
 
     <div class="chart">
@@ -81,6 +101,11 @@ const props = defineProps({
    *   c: 43
    * }
    */
+  measuredCurrents: {
+    type: Object,
+    default: () => ({ a: null, b: null, c: null }),
+  },
+
   currents: {
     type: Object,
     required: true,
@@ -143,6 +168,17 @@ const safeMax = computed(() => {
     ? value
     : safeMin.value + 1
 })
+
+const measuredPhases = computed(() =>
+  phaseDefinitions.map(definition => {
+    const value = props.measuredCurrents?.[definition.key]
+    const numeric = value === null || value === undefined || value === '' ? null : Number(value)
+    return {
+      ...definition,
+      current: numeric !== null && Number.isFinite(numeric) ? numeric : null,
+    }
+  })
+)
 
 const phases = computed(() => {
   return phaseDefinitions.map(
@@ -231,6 +267,9 @@ const ticks = computed(() => {
   )
 })
 
+const formatMeasuredCurrent = value =>
+  Number.isFinite(value) ? value.toFixed(2) : '—'
+
 const formatCurrent = value => {
   if (!Number.isFinite(value)) {
     return '—'
@@ -263,6 +302,44 @@ const formatTick = value => {
 </script>
 
 <style scoped>
+.measured-strip {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.4fr) repeat(3, minmax(60px, .7fr));
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 14px;
+  padding: 10px;
+  border: 1px solid #245264;
+  border-radius: 12px;
+  background: rgba(8, 27, 37, .72);
+}
+.measured-copy { display: grid; align-content: center; gap: 2px; }
+.measured-copy strong { color: #8ff1c3; font-size: 10px; letter-spacing: .05em; }
+.measured-copy small { color: #6f91a3; font-size: 8px; }
+.measured-phase {
+  display: grid;
+  gap: 3px;
+  align-content: center;
+  justify-items: end;
+  padding: 7px 8px;
+  border: 1px solid #1d4355;
+  border-radius: 9px;
+  background: #071721;
+}
+.measured-phase span { color: #6f91a3; font-size: 8px; }
+.measured-phase strong { color: #eaf6ff; font-size: 12px; }
+.model-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  color: #6f91a3;
+  font-size: 8px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.model-heading strong { color: #83a7bd; font-size: 8px; }
+
 .current-card {
   --text: #eaf6ff;
   --muted: #83a7bd;
@@ -499,4 +576,5 @@ h2 {
 
   border-radius: 50%;
 }
+@media(max-width:700px){.measured-strip{grid-template-columns:1fr 1fr}.measured-copy{grid-column:1/-1}.model-heading{flex-direction:column}}
 </style>

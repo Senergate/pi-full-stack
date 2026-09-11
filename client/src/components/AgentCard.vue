@@ -163,6 +163,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { classifyVuf, formatVufPercent } from '../VufPresentation.js';
 
 const CRITICAL_VUF = 2.0;
 const SETTLE_TIME_MS = 5000;
@@ -300,14 +301,7 @@ watch([normalizedDeviceStates, normalizedHeatpumpMode], ([current, heatpumpMode]
   }
 }, { deep: true });
 
-const conditionForVuf = value => {
-  if (value === null || value === undefined || value === '') return { label: 'Unknown', className: 'unknown' };
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return { label: 'Unknown', className: 'unknown' };
-  if (numeric > 2) return { label: 'Critical', className: 'critical' };
-  if (numeric > 1) return { label: 'Warning', className: 'warning' };
-  return { label: 'Balanced', className: 'balanced' };
-};
+const conditionForVuf = value => classifyVuf(value);
 
 const condition = computed(() => conditionForVuf(props.vuf));
 const vuf = computed(() => props.vuf);
@@ -315,11 +309,7 @@ const vuf = computed(() => props.vuf);
 const cooldownRemaining = computed(() => Math.max(0, (cooldownUntil.value - now.value) / 1000));
 const cooldownProgress = computed(() => 100 - Math.min(100, (cooldownRemaining.value / (SETTLE_TIME_MS / 1000)) * 100));
 
-const formatVuf = value => {
-  if (value === null || value === undefined || value === '') return '--';
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? `${numeric.toFixed(2)}%` : '--';
-};
+const formatVuf = value => formatVufPercent(value);
 
 const addLog = async (title, message, type = 'info') => {
   const entry = {

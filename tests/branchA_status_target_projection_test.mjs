@@ -29,8 +29,8 @@ const currents = projectBuildingCurrents({
   wallboxMask: 3,
   batteryCharging: true,
 });
-assert(currents.a === 35 && currents.b === 64 && currents.c === 20,
-  `start,50 + wallbox mask3 + battery must project 35/64/20 A, got ${JSON.stringify(currents)}`);
+assert(currents.a === 40 && currents.b === 64 && currents.c === 40,
+  `start,50 + wallbox mask3 + battery must project 40/64/40 A, got ${JSON.stringify(currents)}`);
 
 // Once actual/RFRD reaches the drive speed, execution confirmation catches up.
 const runningActual = deriveHeatpumpStatus({

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 const dashboard = fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue', import.meta.url), 'utf8');
 const adapter = fs.readFileSync(new URL('../client/src/HeatpumpStatusAdapter.js', import.meta.url), 'utf8');
 
-if (!dashboard.includes("import { deriveHeatpumpStatus } from '../HeatpumpStatusAdapter.js';")) {
+if (!dashboard.includes("deriveHeatpumpStatus, heatpumpCommandToTwinLevel") || !dashboard.includes("from '../HeatpumpStatusAdapter.js'")) {
   throw new Error('SimpleDashboard must use HeatpumpStatusAdapter.');
 }
 if (!dashboard.includes('const interpreted = deriveHeatpumpStatus(payload, _.heatpump.commanded);')) {

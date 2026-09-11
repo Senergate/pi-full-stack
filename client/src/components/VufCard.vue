@@ -41,6 +41,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { classifyVuf, formatVufPercent, numberOrNullVuf } from '../VufPresentation.js';
 
 const props = defineProps({
   vuf: {
@@ -79,40 +80,20 @@ const graphState = reactive({
   resizeObserver: null,
 });
 
-const safeVuf = computed(() => {
-  if (props.vuf === null || props.vuf === undefined || props.vuf === '') {
-    return null;
-  }
+const safeVuf = computed(() => numberOrNullVuf(props.vuf));
 
-  const value = Number(props.vuf);
-  return Number.isFinite(value) ? Math.max(0, value) : null;
-});
+const formatPercent = value => formatVufPercent(value);
+const formattedVuf = computed(() => formatVufPercent(safeVuf.value));
+const formattedBaseline = computed(() => formatVufPercent(props.baselineVuf));
+const formattedLoadImpact = computed(() => formatVufPercent(props.loadImpactVuf));
 
-const formatPercent = value => {
-  if (value === null || value === undefined || value === '') return '--';
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? `${numeric.toFixed(2)}%` : '--';
-};
-
-const formattedVuf = computed(() =>
-  safeVuf.value === null ? '--' : `${safeVuf.value.toFixed(1)}%`
-);
-
-const formattedBaseline = computed(() => formatPercent(props.baselineVuf));
-const formattedLoadImpact = computed(() => formatPercent(props.loadImpactVuf));
-
-const statusLabel = computed(() => {
-  if (safeVuf.value === null) return 'NO DATA';
-  if (safeVuf.value > 2) return 'HIGH';
-  if (safeVuf.value > 1) return 'BALANCING';
-  return 'BALANCED';
-});
-
+const status = computed(() => classifyVuf(safeVuf.value));
+const statusLabel = computed(() => status.value.label.toUpperCase());
 const statusClass = computed(() => {
-  if (safeVuf.value === null) return 'unknown';
-  if (safeVuf.value > 2) return 'bad';
-  if (safeVuf.value > 1) return 'warn';
-  return 'good';
+  if (status.value.className === 'critical') return 'bad';
+  if (status.value.className === 'warning') return 'warn';
+  if (status.value.className === 'balanced') return 'good';
+  return 'unknown';
 });
 
 const gaugeWidth = computed(() =>

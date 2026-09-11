@@ -12,7 +12,7 @@ import VufCard from './VufCard.vue';
 import CurrentCard from './CurrentCard.vue';
 import PhasorCard from './PhasorCard.vue';
 import AgentCard from './AgentCard.vue';
-import { deriveHeatpumpStatus } from '../HeatpumpStatusAdapter.js';
+import { deriveHeatpumpStatus, heatpumpCommandToTwinLevel } from '../HeatpumpStatusAdapter.js';
 
 const sourceScenarios = {
   ideal: {
@@ -64,6 +64,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
+const FRONTEND_BUILD_VERSION = 'v1.4-twin-40-64-40-vuf-1dp';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -114,9 +115,23 @@ let unwatchStartupChecklist = null;
 let unwatchBranchAState = null;
 let boundRuntime = false;
 let startupTimer = null;
+let heatpumpCommandGeneration = 0;
 
-const currentSourceLabel = computed(() => 'BUILDING-SCALE DIGITAL TWIN · REAL execution state');
-const currentYRange = computed(() => ({ min: 0, max: 350 }));
+const heatpumpTwinUsesCommandTrajectory = computed(() => {
+  const confirmed = numberOrNull(_.heatpump.level);
+  const modeled = numberOrNull(_.heatpump.twinLevel);
+  const state = String(_.heatpump.executionState ?? '').toUpperCase();
+  return _.heatpump.commanded !== null &&
+    ['STARTING', 'RUNNING'].includes(state) &&
+    modeled !== null && modeled !== confirmed;
+});
+
+const currentSourceLabel = computed(() =>
+  heatpumpTwinUsesCommandTrajectory.value
+    ? 'BUILDING-SCALE DIGITAL TWIN · COMMAND TRAJECTORY (execution pending)'
+    : 'BUILDING-SCALE DIGITAL TWIN · REAL execution state'
+);
+const currentYRange = computed(() => ({ min: 0, max: 100 }));
 const STARTUP_TIMEOUT_MS = 6000;
 
 const numberOrNull = value => {
@@ -163,8 +178,40 @@ const levelToHeatpumpCommand = (level, forcedMode = null) => {
 };
 
 const sendHeatpumpCommand = command => {
-  _.heatpump.commanded = { ...command, ts: Date.now() };
-  return App.EspService.heatpump(command);
+  const generation = ++heatpumpCommandGeneration;
+  const previousCommanded = _.heatpump.commanded ? { ..._.heatpump.commanded } : null;
+  const previousTwinLevel = _.heatpump.twinLevel;
+  const twinLevel = heatpumpCommandToTwinLevel(command);
+
+  // Building-Twin command trajectory: update immediately when the operator/AI
+  // issues a valid command. This is MODELED command state, not physical
+  // execution confirmation. confirmedLevel (_.heatpump.level) remains driven
+  // only by Branch-A status/RFRD in onBranchAStatus().
+  _.heatpump.commanded = { ...command, ts: Date.now(), generation };
+  if (twinLevel !== null) _.heatpump.twinLevel = twinLevel;
+
+  return Promise.resolve(App.EspService.heatpump(command))
+    .then(result => {
+      if (generation !== heatpumpCommandGeneration) return result;
+
+      if (result?.accepted === false) {
+        _.heatpump.commanded = previousCommanded;
+        _.heatpump.twinLevel = previousTwinLevel;
+      }
+      return result;
+    })
+    .catch(error => {
+      if (generation === heatpumpCommandGeneration) {
+        _.heatpump.commanded = previousCommanded;
+        _.heatpump.twinLevel = previousTwinLevel;
+      }
+      console.error('Heatpump RPC failed; Building-Twin command projection rolled back.', error);
+      return {
+        accepted: false,
+        reason: 'rpc_failed',
+        message: error instanceof Error ? error.message : String(error),
+      };
+    });
 };
 
 const selectScenario = key => {
@@ -402,6 +449,9 @@ const startupAllReady = computed(() => Object.values(startupChecklist.value).eve
 const startupDataVisible = computed(() => _.startup.phase === 'ready' && startupCoreReady.value);
 
 const startupNullPhases = Object.freeze({ a: null, b: null, c: null });
+const displayMeasuredCurrents = computed(() =>
+  startupDataVisible.value ? measuredCurrents.value : startupNullPhases
+);
 const displayProjectedCurrents = computed(() =>
   startupDataVisible.value ? projectedCurrents.value : startupNullPhases
 );
@@ -836,6 +886,7 @@ const retryInitialization = async () => {
 };
 
 const init = () => {
+  console.info(`[Senergate] Frontend ${FRONTEND_BUILD_VERSION}`);
   selectScenario('realistic');
   App.ensureConnected();
   updateStartupPhase();
@@ -886,6 +937,7 @@ onUnmounted(() => {
       <div class="runtime-switch">
         <span class="runtime-label">RUN MODE</span>
         <span class="runtime-fixed">REAL HARDWARE</span>
+        <span class="runtime-version">{{ FRONTEND_BUILD_VERSION }}</span>
         <span class="runtime-status" :class="App._.connected ? 'online' : 'offline'">
           {{ App._.connected ? 'Pi5 CONNECTED' : 'Pi5 DISCONNECTED' }}
         </span>
@@ -962,13 +1014,15 @@ onUnmounted(() => {
         <span>|Z<sub>N</sub>| = {{ formatNullableNumber(neutralImpedanceMagnitude, 3, ' Ω') }}</span>
         <span>|V<sub>N</sub>| = {{ neutralVoltageDropMagnitude !== null ? `${neutralVoltageDropMagnitude.toFixed(2)} V` : '--' }}</span>
         <span>Model: V<sub>LN</sub> = E − Z<sub>phase</sub>I − Z<sub>N</sub>I<sub>N</sub></span>
-        <span>Branch A: 1 motor → 3 HP</span>
-        <span>Branch B: 1 relay → 2 WB · 2 relays → 4 WB</span>
+        <span>Branch A: 1 motor → 2 HP modules · max 40 A</span>
+        <span>Branch B: 1 relay → 2 WB · 2 relays → 4 WB · max 64 A</span>
+        <span>Battery: building equivalent · max 40 A</span>
       </div>
     </div>
 
     <div class="overview-grid">
       <CurrentCard
+        :measured-currents="displayMeasuredCurrents"
         :currents="displayProjectedCurrents"
         :y-range="currentYRange"
         :source-label="currentSourceLabel"
@@ -1018,5 +1072,5 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
+.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
 </style>
