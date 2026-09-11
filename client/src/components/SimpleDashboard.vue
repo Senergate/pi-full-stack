@@ -2,12 +2,16 @@
 import { computed, onMounted, onUnmounted, reactive, watch } from 'vue';
 
 import App from '../App.js';
+import {
+  BUILDING_TWIN_CONFIG,
+  projectBuildingCurrents,
+  wallboxMaskFromRelays,
+} from '../BuildingTwinModel.js';
 import PhasorCalculator from './PhasorCalculator.js';
 import VufCard from './VufCard.vue';
 import CurrentCard from './CurrentCard.vue';
 import PhasorCard from './PhasorCard.vue';
 import AgentCard from './AgentCard.vue';
-import { BUILDING_TWIN_CONFIG, projectBuildingCurrents, wallboxMaskFromRelays } from '../BuildingTwinModel.js';
 import { deriveHeatpumpStatus } from '../HeatpumpStatusAdapter.js';
 
 const sourceScenarios = {
@@ -20,16 +24,44 @@ const sourceScenarios = {
 };
 
 /*
- * Grid-Impedance presets are explicitly MODELED Building-Twin parameters.
+ * Grid-Impedance presets are explicit BUILDING-TWIN model parameters.
  * They are not measured/calibrated values of the real Senergate site.
  * Version 1 exposes Rphase/Xphase/Rneutral/Xneutral as recommended by the
  * Senergate Grid-Impedance implementation guide.
  */
 const GRID_IMPEDANCE_PRESETS = {
-  stiff: { label: 'Stiff LV Grid', rPhase: 0.03, xPhase: 0.01, rNeutral: 0.02, xNeutral: 0.005, provenance: 'generic_reference_only' },
-  typical: { label: 'Typical Building Feeder', rPhase: 0.08, xPhase: 0.03, rNeutral: 0.06, xNeutral: 0.02, provenance: 'generic_reference_only' },
-  weak: { label: 'Weak Feeder', rPhase: 0.12, xPhase: 0.05, rNeutral: 0.10, xNeutral: 0.03, provenance: 'generic_reference_only' },
-  demo: { label: 'Demo Feeder · Building Twin', rPhase: 0.40, xPhase: 0.15, rNeutral: 0.30, xNeutral: 0.10, provenance: 'modeled_demo_feeder_not_site_calibrated' },
+  stiff: {
+    label: 'Stiff LV Grid',
+    rPhase: 0.03,
+    xPhase: 0.01,
+    rNeutral: 0.02,
+    xNeutral: 0.005,
+    provenance: 'generic_reference_only',
+  },
+  typical: {
+    label: 'Typical Building Feeder',
+    rPhase: 0.08,
+    xPhase: 0.03,
+    rNeutral: 0.06,
+    xNeutral: 0.02,
+    provenance: 'generic_reference_only',
+  },
+  weak: {
+    label: 'Weak Feeder',
+    rPhase: 0.12,
+    xPhase: 0.05,
+    rNeutral: 0.10,
+    xNeutral: 0.03,
+    provenance: 'generic_reference_only',
+  },
+  demo: {
+    label: 'Demo Feeder · Building Twin',
+    rPhase: 0.40,
+    xPhase: 0.15,
+    rNeutral: 0.30,
+    xNeutral: 0.10,
+    provenance: 'modeled_demo_feeder_not_site_calibrated',
+  },
 };
 
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
@@ -40,7 +72,7 @@ const CURRENT_ZERO_OFFSET_A = { a: 0.24, b: 0.19, c: 0.13 };
 
 const _ = reactive({
   count: 0,
-  heatpump: { level: null, commanded: null, targetHz: null, actualHz: null, executionState: '' },
+  heatpump: { level: null, twinLevel: null, mode: null, commanded: null, effectiveTargetHz: null, effectiveTargetSource: null, targetHz: null, actualHz: null, executionState: '' },
   wallbox: { load: null, r0: null, r1: null, r0Update: null, r1Update: null },
   battery: { charging: null, lastUpdate: null },
   energy_meter: {
@@ -64,7 +96,13 @@ const _ = reactive({
   },
   agent: { enabled: false },
   mqtt: { connected: false, lastHeartbeatAt: null },
-  startup: { phase: 'connecting', requestedAt: null, completedAt: null, timeoutAt: null, message: 'Connecting to Pi5…' },
+  startup: {
+    phase: 'connecting',
+    requestedAt: null,
+    completedAt: null,
+    timeoutAt: null,
+    message: 'Connecting to Pi5…',
+  },
   realFeedback: {
     branchA: { payload: null, ack: null, lastUpdate: null, ackUpdate: null },
   },
@@ -77,8 +115,8 @@ let unwatchBranchAState = null;
 let boundRuntime = false;
 let startupTimer = null;
 
-const currentSourceLabel = computed(() => 'BUILDING-SCALE DIGITAL TWIN · REAL EXECUTION STATE');
-const currentYRange = computed(() => ({ min: 0, max: 70 }));
+const currentSourceLabel = computed(() => 'BUILDING-SCALE DIGITAL TWIN · REAL execution state');
+const currentYRange = computed(() => ({ min: 0, max: 350 }));
 const STARTUP_TIMEOUT_MS = 6000;
 
 const numberOrNull = value => {
@@ -100,12 +138,27 @@ const boolOrNull = value => {
   return null;
 };
 
+const firstNumber = (...values) => {
+  for (const value of values) {
+    const parsed = numberOrNull(value);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+};
+
 const levelToTargetHz = level => HEATPUMP_LEVEL_TO_HZ[clampInt(level, 0, HEATPUMP_LEVELS)] ?? 0;
+
+const frequencyHzToLevel = hz => {
+  const n = numberOrNull(hz);
+  if (n === null) return null;
+  if (n <= 2) return 0;
+  return clampInt(Math.round(n / 10), 1, HEATPUMP_LEVELS);
+};
 
 const levelToHeatpumpCommand = (level, forcedMode = null) => {
   const safeLevel = clampInt(level, 0, HEATPUMP_LEVELS);
-  if (forcedMode === 'zero_hold') return { mode: 'zero_hold', level: 0, target_hz: 0 };
-  if (forcedMode === 'stop' || safeLevel === 0) return { mode: 'stop', level: 0, target_hz: 0 };
+  if (forcedMode === 'stop') return { mode: 'stop', level: 0, target_hz: 0 };
+  if (forcedMode === 'zero_hold' || safeLevel === 0) return { mode: 'zero_hold', level: 0, target_hz: 0 };
   return { mode: 'start', level: safeLevel, target_hz: levelToTargetHz(safeLevel) };
 };
 
@@ -133,7 +186,11 @@ const formatNullableNumber = (value, digits = 3, suffix = '') => {
 
 const markRealStateWaiting = () => {
   _.heatpump.level = null;
+  _.heatpump.twinLevel = null;
+  _.heatpump.mode = null;
   _.heatpump.commanded = null;
+  _.heatpump.effectiveTargetHz = null;
+  _.heatpump.effectiveTargetSource = null;
   _.heatpump.targetHz = null;
   _.heatpump.actualHz = null;
   _.heatpump.executionState = '';
@@ -197,13 +254,13 @@ const measuredCurrents = computed(() => ({
 }));
 
 const projectedCurrents = computed(() => {
-  const heatpumpLevelValue = numberOrNull(_.heatpump.level);
+  const heatpumpLevel = numberOrNull(_.heatpump.twinLevel);
   const wallboxMask = (_.wallbox.r0 === null || _.wallbox.r1 === null)
     ? null
     : wallboxMaskFromRelays(_.wallbox.r0, _.wallbox.r1);
 
   return projectBuildingCurrents({
-    heatpumpLevel: heatpumpLevelValue,
+    heatpumpLevel,
     wallboxMask,
     batteryCharging: _.battery.charging,
   });
@@ -226,6 +283,8 @@ const twinVoltages = computed(() => {
   if ([measured.a, measured.b, measured.c].some(value => value === null)) {
     return { a: null, b: null, c: null };
   }
+  // Keep Shelly voltage magnitudes unchanged. Angles and grid impedance below
+  // are still model assumptions, therefore the resulting VUF is ESTIMATED.
   return { ...measured };
 });
 
@@ -285,20 +344,27 @@ const branchAState = computed(() =>
 );
 
 const branchAReady = computed(() => {
+  const state = branchAState.value;
   const validStates = ['READY', 'STOP', 'STOPPED', 'ZERO_HOLD', 'STARTING', 'RUNNING', 'RAMPING_TO_ZERO_HOLD'];
-  if (!validStates.includes(branchAState.value)) return false;
+  if (!validStates.includes(state)) return false;
   const last = numberOrNull(_.realFeedback.branchA.lastUpdate);
   return last !== null && performance.now() - last < 3000;
 });
 
 const BRANCH_B_STATUS_FRESH_MS = 3000;
+
 const branchBReady = computed(() => {
+  // Branch B is NOT an ESP32 device in the current prototype. Its execution
+  // truth comes directly from WallboxService/Shelly switch status for both
+  // physical resistor channels.
   const now = performance.now();
   const r0Update = numberOrNull(_.wallbox.r0Update);
   const r1Update = numberOrNull(_.wallbox.r1Update);
-  return _.wallbox.r0 !== null && _.wallbox.r1 !== null &&
-    r0Update !== null && r1Update !== null &&
-    now - r0Update < BRANCH_B_STATUS_FRESH_MS && now - r1Update < BRANCH_B_STATUS_FRESH_MS;
+
+  const r0Fresh = _.wallbox.r0 !== null && r0Update !== null && now - r0Update < BRANCH_B_STATUS_FRESH_MS;
+  const r1Fresh = _.wallbox.r1 !== null && r1Update !== null && now - r1Update < BRANCH_B_STATUS_FRESH_MS;
+
+  return r0Fresh && r1Fresh;
 });
 
 const startupRequestReceived = update => {
@@ -313,20 +379,35 @@ const startupChecklist = computed(() => ({
   mqtt: _.mqtt.connected === true,
   measurement: startupRequestReceived(_.energy_meter.lastUpdate),
   branchA: startupRequestReceived(_.realFeedback.branchA.lastUpdate) && branchAReady.value,
-  branchB: startupRequestReceived(_.wallbox.r0Update) && startupRequestReceived(_.wallbox.r1Update) && branchBReady.value,
+  branchB:
+    startupRequestReceived(_.wallbox.r0Update) &&
+    startupRequestReceived(_.wallbox.r1Update) &&
+    branchBReady.value,
   battery: startupRequestReceived(_.battery.lastUpdate) && _.battery.charging !== null,
 }));
 
 const startupCoreReady = computed(() =>
-  startupChecklist.value.socket && startupChecklist.value.services && startupChecklist.value.mqtt &&
-  startupChecklist.value.measurement && startupChecklist.value.branchA
+  startupChecklist.value.socket &&
+  startupChecklist.value.services &&
+  startupChecklist.value.mqtt &&
+  startupChecklist.value.measurement &&
+  startupChecklist.value.branchA
 );
+
 const startupAllReady = computed(() => Object.values(startupChecklist.value).every(Boolean));
+
+// Branch B and Battery are checked and displayed, but they must not hold the
+// whole dashboard hostage. The previous working control path only required
+// fresh measurement data plus Branch-A readiness for general operation.
 const startupDataVisible = computed(() => _.startup.phase === 'ready' && startupCoreReady.value);
+
 const startupNullPhases = Object.freeze({ a: null, b: null, c: null });
-const displayProjectedCurrents = computed(() => startupDataVisible.value ? projectedCurrents.value : startupNullPhases);
-const displayMeasuredCurrents = computed(() => startupDataVisible.value ? measuredCurrents.value : startupNullPhases);
-const displayPhasorVoltages = computed(() => startupDataVisible.value ? loadVoltagesForPhasor.value : startupNullPhases);
+const displayProjectedCurrents = computed(() =>
+  startupDataVisible.value ? projectedCurrents.value : startupNullPhases
+);
+const displayPhasorVoltages = computed(() =>
+  startupDataVisible.value ? loadVoltagesForPhasor.value : startupNullPhases
+);
 const displayCurrentVuf = computed(() => startupDataVisible.value ? currentVuf.value : null);
 const displayBaselineVuf = computed(() => startupDataVisible.value ? baselineVuf.value : null);
 const displayLoadImpactVuf = computed(() => startupDataVisible.value ? loadImpactVuf.value : null);
@@ -349,8 +430,8 @@ const startupStatusLabel = computed(() => {
   return 'CONNECTING';
 });
 
-// Keep the previous working global control gate. Branch B/Battery do not lock unrelated controls.
 const controlReady = computed(() => measurementFresh.value && branchAReady.value);
+
 const controlBlockedReason = computed(() => {
   if (!measurementFresh.value) return 'Measurement data stale or unavailable';
   if (!branchAReady.value) return 'Waiting for Branch-A status or Branch-A is not ready';
@@ -361,13 +442,8 @@ const controlBlockedReason = computed(() => {
 const commandFeedback = computed(() => ({
   branchA: {
     ack: _.realFeedback.branchA.ack,
-    status: _.heatpump.executionState
-      ? `${_.heatpump.executionState} · target=${_.heatpump.targetHz ?? '--'} Hz · actual=${_.heatpump.actualHz ?? '--'} Hz`
-      : _.realFeedback.branchA.payload,
+    status: _.realFeedback.branchA.payload,
     commanded: _.heatpump.commanded,
-    executionState: _.heatpump.executionState,
-    targetHz: _.heatpump.targetHz,
-    actualHz: _.heatpump.actualHz,
     fresh: branchAReady.value,
   },
   branchB: {
@@ -389,6 +465,11 @@ const heatpumpLevel = computed(() => {
   return level === null ? null : clampInt(level, 0, HEATPUMP_LEVELS);
 });
 
+const heatpumpMode = computed(() => {
+  const mode = String(_.heatpump.mode ?? '').toLowerCase();
+  return ['start', 'stop', 'zero_hold'].includes(mode) ? mode : null;
+});
+
 const wallboxLevel = computed(() => {
   if (_.wallbox.r0 === null || _.wallbox.r1 === null) return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
   return (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
@@ -398,6 +479,7 @@ const batteryCharging = computed(() => (_.battery.charging === null ? null : _.b
 
 const agentDeviceStates = computed(() => ({
   heatpump: heatpumpLevel.value,
+  heatpumpMode: heatpumpMode.value,
   wallbox: wallboxLevel.value,
   batteryCharging: batteryCharging.value,
 }));
@@ -408,6 +490,7 @@ const predictVufForDeviceState = candidate => {
     wallboxMask: candidate.wallbox,
     batteryCharging: candidate.batteryCharging,
   });
+
   if ([currents.a, currents.b, currents.c].some(value => value === null)) return null;
 
   const result = PhasorCalculator.analyzeVUF({
@@ -438,6 +521,9 @@ const applyAgentDeviceState = state => {
     const targetR0 = (targetWallbox & 1) !== 0;
     const targetR1 = (targetWallbox & 2) !== 0;
 
+    // Keep the last confirmed Shelly state visible while a new command is in
+    // flight. Do not set r0/r1 to null: that used to invalidate the global
+    // control gate until the next (sometimes >10 s delayed) Shelly status.
     if (_.wallbox.r0 !== targetR0) runtime.WallboxService.set(0, targetR0);
     if (_.wallbox.r1 !== targetR1) runtime.WallboxService.set(1, targetR1);
   }
@@ -476,9 +562,13 @@ const onEnergyMeter = payload => {
 
   measured.source_type = 'measured';
 
+  // Building current is not produced by multiplying Shelly current. The actual
+  // projected values are computed from confirmed Branch-A/B/Battery state.
   const projected = {
     source_type: 'digital_twin_from_real_state',
-    projection_model: BUILDING_TWIN_CONFIG.provenance,
+    projection_model: 'equivalent_devices_v1',
+    base_current_a: { ...BUILDING_TWIN_CONFIG.baseCurrentA },
+    model_provenance: BUILDING_TWIN_CONFIG.provenance,
     branchA_equivalent_heatpumps: BUILDING_TWIN_CONFIG.branchAEquivalentHeatpumps,
     branchB_equivalent_wallboxes_per_relay: BUILDING_TWIN_CONFIG.branchBEquivalentWallboxesPerRelay,
   };
@@ -498,11 +588,50 @@ const onBranchAStatus = payload => {
   _.realFeedback.branchA.payload = payload;
   _.realFeedback.branchA.lastUpdate = performance.now();
 
-  const interpreted = deriveHeatpumpStatus(payload);
+  const interpreted = deriveHeatpumpStatus(payload, _.heatpump.commanded);
   _.heatpump.executionState = interpreted.state;
+  _.heatpump.mode = interpreted.mode;
   _.heatpump.targetHz = interpreted.targetHz;
   _.heatpump.actualHz = interpreted.actualHz;
-  if (interpreted.modelLevel !== null) _.heatpump.level = interpreted.modelLevel;
+  _.heatpump.effectiveTargetHz = interpreted.effectiveTargetHz;
+  _.heatpump.effectiveTargetSource = interpreted.effectiveTargetSource;
+
+  // Keep execution confirmation and Building-Twin projection separate.
+  // confirmedLevel follows real Branch-A feedback (P03 semantics), while
+  // twinLevel may use the active start command during STARTING so the Digital
+  // Twin does not collapse to 0 A merely because LFRD/RFRD still read 0 Hz.
+  if (interpreted.confirmedLevel !== null) _.heatpump.level = interpreted.confirmedLevel;
+  if (interpreted.twinLevel !== null) _.heatpump.twinLevel = interpreted.twinLevel;
+
+  // Terminal states invalidate an old command target. This prevents a stale
+  // start,50 command from influencing a later STOP/ZERO_HOLD status.
+  if (['STOP', 'STOPPED', 'READY', 'SAFE_MODE', 'FAULT', 'ERROR', 'ZERO_HOLD'].includes(interpreted.state)) {
+    _.heatpump.commanded = null;
+  }
+};
+
+const pickBool = (...values) => {
+  for (const value of values) {
+    const parsed = boolOrNull(value);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+};
+
+const readRelay = (payload, index) => {
+  const root = payload ?? {};
+  const relays = root.relays ?? {};
+  const relayArray = Array.isArray(root.relay) ? root.relay : [];
+
+  if (index === 0) {
+    return pickBool(root.r0, root.relay0, root.relay_0, relays.r0, relays.relay0, relays.relay_0, own(root, 'relay1') && own(root, 'relay2') ? root.relay1 : undefined, relayArray[0]);
+  }
+
+  if (index === 1) {
+    return pickBool(root.r1, root.relay_1, root.relay2, relays.r1, relays.relay_1, relays.relay2, own(root, 'relay0') ? root.relay1 : undefined, relayArray[1]);
+  }
+
+  return null;
 };
 
 const onWallbox = data => {
@@ -520,9 +649,37 @@ const onBattery = data => {
   if (output !== null) { _.battery.charging = output; _.battery.lastUpdate = performance.now(); }
 };
 
+const toggleWallbox = r => {
+  if (!controlReady.value) return;
+  if (r === 0) {
+    if (_.wallbox.r0 === null) return;
+    const state = !_.wallbox.r0;
+    App.WallboxService.set(0, state);
+    return;
+  }
+
+  if (_.wallbox.r1 === null) return;
+  const state = !_.wallbox.r1;
+  App.WallboxService.set(1, state);
+};
+
+const updateHeatpumpLoad = value => {
+  if (!controlReady.value) return;
+  sendHeatpumpCommand(levelToHeatpumpCommand(clampInt(value, 0, HEATPUMP_LEVELS)));
+};
+
+const requestHeatpumpStop = () => {
+  if (!controlReady.value) return;
+  sendHeatpumpCommand(levelToHeatpumpCommand(0, 'stop'));
+};
+
 const requestHeatpumpZeroHold = () => {
   if (!controlReady.value) return;
   sendHeatpumpCommand(levelToHeatpumpCommand(0, 'zero_hold'));
+};
+
+const updateCount = value => {
+  _.count = value;
 };
 
 const animate = () => {
@@ -545,17 +702,26 @@ const updateStartupPhase = () => {
     _.startup.message = App._.lastError || 'Waiting for Pi5/Socket.IO connection…';
     return;
   }
+
   if (!App._.servicesReady) {
     _.startup.phase = 'services';
     _.startup.message = 'Connected. Loading Pi5 services…';
     return;
   }
-  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(branchAState.value)) {
+
+  if (_.startup.requestedAt !== null && !_.mqtt.connected) {
+    _.startup.phase = 'requesting';
+    _.startup.message = 'Pi5 server connected, but MQTT broker is not ready.';
+  }
+
+  const state = branchAState.value;
+  if (['SAFE_MODE', 'FAULT', 'ERROR'].includes(state)) {
     clearStartupTimer();
     _.startup.phase = 'fault';
-    _.startup.message = `Branch A reports ${branchAState.value}. Controls remain blocked.`;
+    _.startup.message = `Branch A reports ${state}. Automatic and manual actuation stays blocked.`;
     return;
   }
+
   if (startupCoreReady.value) {
     _.startup.phase = 'ready';
     _.startup.completedAt = performance.now();
@@ -574,6 +740,7 @@ const updateStartupPhase = () => {
 
 const requestInitialHardwareState = async () => {
   if (!App._.connected || !App._.servicesReady) return;
+
   clearStartupTimer();
   markRealStateWaiting();
   _.energy_meter.timedelta = null;
@@ -582,8 +749,9 @@ const requestInitialHardwareState = async () => {
   _.energy_meter.measured = {};
   _.energy_meter.projected = {};
   _.agent.enabled = false;
+
   _.startup.phase = 'requesting';
-  _.startup.message = 'Requesting fresh Shelly measurement, Branch-A status, Branch-B Shelly relay states and battery status…';
+  _.startup.message = 'Requesting fresh Shelly measurements, Branch A, Branch-B Shelly relay states and battery status…';
   _.startup.requestedAt = performance.now();
   _.startup.completedAt = null;
   _.startup.timeoutAt = null;
@@ -604,11 +772,14 @@ const requestInitialHardwareState = async () => {
     App.EspService?.requestUpdate?.(),
   ]);
 
+  // MQTT may connect while the hardware status requests are in flight.
   try {
     const mqttStatus = await App.MqttService?.status?.();
     _.mqtt.connected = mqttStatus?.connected === true;
     _.mqtt.lastHeartbeatAt = mqttStatus?.last_heartbeat_at ?? null;
-  } catch {}
+  } catch {
+    // Keep the previous MQTT state; startup will remain fail-closed.
+  }
 
   updateStartupPhase();
   if (startupCoreReady.value) return;
@@ -625,6 +796,7 @@ const requestInitialHardwareState = async () => {
 
 const unbindRuntime = () => {
   if (!boundRuntime) return;
+
   App.EnergyMeterService?.off?.('data', onEnergyMeter);
   App.WallboxService?.off?.('data', onWallbox);
   App.BatteryService?.off?.('data', onBattery);
@@ -640,6 +812,7 @@ const bindRuntime = async () => {
     updateStartupPhase();
     return;
   }
+
   if (!App.EnergyMeterService || !App.WallboxService || !App.BatteryService || !App.EspService) {
     _.startup.phase = 'services';
     _.startup.message = 'Required Pi5 services are not available yet.';
@@ -653,6 +826,7 @@ const bindRuntime = async () => {
   App.EspService.on?.('branchA', onBranchAStatus);
   App.EspService.on?.('branchA_ack', onBranchAAck);
   boundRuntime = true;
+
   await requestInitialHardwareState();
 };
 
@@ -748,8 +922,8 @@ onUnmounted(() => {
         <div>
           <strong>Senergate Grid Impedance / Netzimpedanz / 电网阻抗</strong>
           <p>
-            MODELED building-scale feeder parameters for REAL HARDWARE. Demo Feeder is transparent and not site-calibrated.
-            / REAL HARDWARE 使用建筑级馈线模型；Demo Feeder 为明确标注、未经现场标定的演示场景。
+            MODELED building-scale feeder parameters for REAL HARDWARE. The Demo Feeder is deliberately a transparent, non-site-calibrated scenario used to make the prototype VUF response visible.
+            / REAL HARDWARE 使用建筑级馈线模型。Demo Feeder 是明确标注、未经现场标定的演示场景，用于让小功率 Prototype 的 VUF 响应可见。
           </p>
         </div>
         <span class="grid-provenance">{{ _.grid.provenance.toUpperCase() }}</span>
@@ -796,7 +970,6 @@ onUnmounted(() => {
     <div class="overview-grid">
       <CurrentCard
         :currents="displayProjectedCurrents"
-        :measured-currents="displayMeasuredCurrents"
         :y-range="currentYRange"
         :source-label="currentSourceLabel"
       />
@@ -819,6 +992,7 @@ onUnmounted(() => {
         :command-feedback="commandFeedback"
         @apply-state="applyAgentDeviceState"
         @heatpump-zero-hold="requestHeatpumpZeroHold"
+        @heatpump-stop="requestHeatpumpStop"
         @enabled-change="onAgentEnabledChange"
       />
     </div>

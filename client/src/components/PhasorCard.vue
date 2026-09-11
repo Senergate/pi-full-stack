@@ -367,6 +367,7 @@ const phasors = computed(() => {
       const voltage = finiteOrNull(props.voltages?.[definition.key])
       const angle = finiteOrNull(props.angles?.[definition.key])
       const valid = voltage !== null && angle !== null
+
       const radius = valid ? voltageToRadius(voltage) : 0
       const endpoint = valid ? pointFor(radius, angle) : { x: CENTER, y: CENTER }
 
@@ -374,9 +375,11 @@ const phasors = computed(() => {
        * Put the value label slightly beyond
        * the endpoint of the vector.
        */
-      const valueLabel = valid
-        ? pointFor(voltageToRadius(240) + 30, angle)
-        : { x: CENTER, y: CENTER }
+      const valueLabel =
+        pointFor(
+          voltageToRadius(240)+30,
+          angle,
+        )
 
       return {
         ...definition,
@@ -398,6 +401,7 @@ const phasors = computed(() => {
     },
   )
 })
+
 
 const formatVoltage = voltage => {
   const value = finiteOrNull(voltage)

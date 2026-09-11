@@ -38,14 +38,18 @@ const App = {
 
     socket.a_emit = (name, params = []) =>
       new Promise((resolve, reject) => {
-        const timer = window.setTimeout(() => reject(new Error(`RPC timeout: ${name}`)), RPC_TIMEOUT_MS);
+        const timer = window.setTimeout(() => {
+          reject(new Error(`RPC timeout: ${name}`));
+        }, RPC_TIMEOUT_MS);
 
         socket.emit(name, params, response => {
           window.clearTimeout(timer);
+
           if (response && response.ok === false) {
             reject(new Error(response.error?.message ?? response.error ?? `RPC failed: ${name}`));
             return;
           }
+
           resolve(response && response.ok === true ? response.data : response);
         });
       });
@@ -57,6 +61,7 @@ const App = {
 
       try {
         const services = await socket.a_emit('getServices');
+
         for (const name in services) {
           const service = {
             listeners: {},
@@ -69,7 +74,9 @@ const App = {
               const index = service.listeners[event].indexOf(listener);
               if (index !== -1) service.listeners[event].splice(index, 1);
             },
-            trigger: (event, data) => service.listeners[event]?.forEach(listener => listener(...data)),
+            trigger: (event, data) => {
+              service.listeners[event]?.forEach(listener => listener(...data));
+            },
           };
 
           for (const func of services[name]) {
@@ -80,6 +87,7 @@ const App = {
           socket.on(name, (...args) => App[name]?.trigger(args[0], args.slice(1)));
           App[name] = service;
         }
+
         App._.servicesReady = true;
       } catch (err) {
         App._.lastError = err instanceof Error ? err.message : String(err);

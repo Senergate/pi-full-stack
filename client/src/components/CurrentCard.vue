@@ -11,21 +11,6 @@
       </span>
     </div>
 
-    <div class="measured-strip">
-      <div class="measured-strip-title">
-        <span>SHELLY · MEASURED</span>
-        <small>physical prototype current / 真实实测电流</small>
-      </div>
-      <div class="measured-values">
-        <div v-for="phase in measuredPhases" :key="`measured-${phase.key}`" class="measured-phase">
-          <span class="measured-phase-label">{{ phase.label }}</span>
-          <strong>{{ formatMeasuredCurrent(phase.current) }}</strong>
-        </div>
-      </div>
-    </div>
-
-    <div class="modeled-label">BUILDING TWIN · MODELED</div>
-
     <div class="chart">
       <div class="plot-area">
         <!-- Horizontal grid -->
@@ -84,7 +69,7 @@ import { computed } from 'vue'
 const props = defineProps({
   sourceLabel: {
     type: String,
-    default: 'BUILDING-SCALE DIGITAL TWIN · MODELED',
+    default: 'SCALED FROM MEASURED · Digital Twin',
   },
 
   /*
@@ -99,11 +84,6 @@ const props = defineProps({
   currents: {
     type: Object,
     required: true,
-  },
-
-  measuredCurrents: {
-    type: Object,
-    default: () => ({ a: null, b: null, c: null }),
   },
 
   /*
@@ -163,19 +143,6 @@ const safeMax = computed(() => {
     ? value
     : safeMin.value + 1
 })
-
-const numberOrNull = value => {
-  if (value === null || value === undefined || value === '') return null
-  const n = Number(value)
-  return Number.isFinite(n) ? n : null
-}
-
-const measuredPhases = computed(() =>
-  phaseDefinitions.map(definition => ({
-    ...definition,
-    current: numberOrNull(props.measuredCurrents?.[definition.key]),
-  }))
-)
 
 const phases = computed(() => {
   return phaseDefinitions.map(
@@ -281,12 +248,6 @@ const formatCurrent = value => {
   return value.toFixed(1)
 }
 
-const formatMeasuredCurrent = value => {
-  if (!Number.isFinite(value)) return '—'
-  if (Math.abs(value) < 10) return `${value.toFixed(2)} A`
-  return `${value.toFixed(1)} A`
-}
-
 const formatTick = value => {
   if (
     Math.abs(
@@ -367,65 +328,6 @@ h2 {
   border-radius: 999px;
 
   font-size: 11px;
-}
-
-.measured-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin: -4px 0 14px;
-  padding: 10px 12px;
-  border: 1px solid #21465c;
-  border-radius: 12px;
-  background: #081721;
-}
-
-.measured-strip-title {
-  display: grid;
-  gap: 2px;
-  color: #8ff1c3;
-  font-size: 10px;
-  letter-spacing: .08em;
-}
-
-.measured-strip-title small {
-  color: #6f91a3;
-  font-size: 9px;
-  letter-spacing: 0;
-}
-
-.measured-values {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(74px, 1fr));
-  gap: 8px;
-}
-
-.measured-phase {
-  display: grid;
-  gap: 2px;
-  min-width: 74px;
-  padding: 6px 8px;
-  border: 1px solid #17384b;
-  border-radius: 9px;
-  text-align: right;
-}
-
-.measured-phase-label {
-  color: #789aac;
-  font-size: 9px;
-}
-
-.measured-phase strong {
-  color: #eaf6ff;
-  font-size: 12px;
-}
-
-.modeled-label {
-  color: #6f9ab1;
-  font-size: 9px;
-  letter-spacing: .12em;
-  text-transform: uppercase;
 }
 
 /* -----------------------------
@@ -596,9 +498,5 @@ h2 {
   height: 8px;
 
   border-radius: 50%;
-}
-@media(max-width:700px) {
-  .measured-strip { align-items: stretch; flex-direction: column; }
-  .measured-phase { text-align: left; }
 }
 </style>
