@@ -13,6 +13,11 @@ import PhasorCard from './PhasorCard.vue';
 import AgentCard from './AgentCard.vue';
 import { deriveHeatpumpStatus, heatpumpCommandToTwinLevel } from '../HeatpumpStatusAdapter.js';
 import {
+  classifyBranchAAckForCommand,
+  classifyBranchAStatusForCommand,
+  shouldCompleteBranchACommand,
+} from '../BranchACommandCorrelation.js';
+import {
   DEFAULT_ELECTRICAL_PROFILES,
   baselineVoltagesFromProfiles,
   modelBuildingPowers,
@@ -69,7 +74,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5-pq-calibrated-incremental-vuf';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-branchA-race-recheck-fix';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -196,7 +201,16 @@ const sendHeatpumpCommand = command => {
   // issues a valid command. This is MODELED command state, not physical
   // execution confirmation. confirmedLevel (_.heatpump.level) remains driven
   // only by Branch-A status/RFRD in onBranchAStatus().
-  _.heatpump.commanded = { ...command, ts: Date.now(), generation };
+  _.heatpump.commanded = {
+    ...command,
+    ts: Date.now(),
+    generation,
+    ackCmdId: null,
+    ackStatus: 'awaiting_ack',
+    preCommandLastCmdId: _.realFeedback.branchA.payload?.last_cmd_id ?? '',
+    preCommandAckId: _.realFeedback.branchA.ack?.cmd_id ?? '',
+    previousTwinLevel,
+  };
   if (twinLevel !== null) _.heatpump.twinLevel = twinLevel;
 
   return Promise.resolve(App.EspService.heatpump(command))
@@ -681,13 +695,41 @@ const onEnergyMeter = payload => {
 const onBranchAAck = payload => {
   _.realFeedback.branchA.ack = payload;
   _.realFeedback.branchA.ackUpdate = performance.now();
+
+  const commanded = _.heatpump.commanded;
+  const classification = classifyBranchAAckForCommand(commanded, payload);
+  if (!classification.applies || !commanded) return;
+
+  if (!classification.accepted) {
+    // The Pi5 RPC only confirms that the MQTT command was published.  The ESP32
+    // ACK is the authoritative acceptance result.  Roll back only the currently
+    // active generation; a rejected old ACK must never undo a newer command.
+    const rollbackLevel = numberOrNull(commanded.previousTwinLevel);
+    _.heatpump.twinLevel = rollbackLevel ?? numberOrNull(_.heatpump.level) ?? 0;
+    _.heatpump.commanded = null;
+    return;
+  }
+
+  commanded.ackCmdId = classification.cmdId;
+  commanded.ackStatus = 'accepted';
 };
 
 const onBranchAStatus = payload => {
   _.realFeedback.branchA.payload = payload;
   _.realFeedback.branchA.lastUpdate = performance.now();
 
-  const interpreted = deriveHeatpumpStatus(payload, _.heatpump.commanded);
+  const commanded = _.heatpump.commanded;
+  const correlation = classifyBranchAStatusForCommand(commanded, payload);
+
+  // Ignore an older periodic READY/STOP/status while a newer command is waiting
+  // for ACK/status correlation.  Diagnostic payload freshness is still updated
+  // above, but the execution/twin state is deliberately preserved.
+  if (!correlation.applies) return;
+
+  const interpreted = deriveHeatpumpStatus(payload, commanded);
+  const commandComplete = shouldCompleteBranchACommand(commanded, payload, interpreted.confirmedLevel);
+  const commandedTwinLevel = commanded ? heatpumpCommandToTwinLevel(commanded) : null;
+
   _.heatpump.executionState = interpreted.state;
   _.heatpump.mode = interpreted.mode;
   _.heatpump.targetHz = interpreted.targetHz;
@@ -695,16 +737,18 @@ const onBranchAStatus = payload => {
   _.heatpump.effectiveTargetHz = interpreted.effectiveTargetHz;
   _.heatpump.effectiveTargetSource = interpreted.effectiveTargetSource;
 
-  // Keep execution confirmation and Building-Twin projection separate.
-  // confirmedLevel follows real Branch-A feedback (P03 semantics), while
-  // twinLevel may use the active start command during STARTING so the Digital
-  // Twin does not collapse to 0 A merely because LFRD/RFRD still read 0 Hz.
+  // Execution truth follows ESP32/RFRD.  While a correlated command is still
+  // executing, the Building Twin keeps the command trajectory that was shown on
+  // the first click.  This also covers live RUNNING frequency changes where RFRD
+  // may still report the previous level for a short time.
   if (interpreted.confirmedLevel !== null) _.heatpump.level = interpreted.confirmedLevel;
-  if (interpreted.twinLevel !== null) _.heatpump.twinLevel = interpreted.twinLevel;
+  if (commanded && !commandComplete && commandedTwinLevel !== null && !correlation.safety) {
+    _.heatpump.twinLevel = commandedTwinLevel;
+  } else if (interpreted.twinLevel !== null) {
+    _.heatpump.twinLevel = interpreted.twinLevel;
+  }
 
-  // Terminal states invalidate an old command target. This prevents a stale
-  // start,50 command from influencing a later STOP/ZERO_HOLD status.
-  if (['STOP', 'STOPPED', 'READY', 'SAFE_MODE', 'FAULT', 'ERROR', 'ZERO_HOLD'].includes(interpreted.state)) {
+  if (commandComplete) {
     _.heatpump.commanded = null;
   }
 };
@@ -889,17 +933,19 @@ const updateStartupPhase = () => {
   }
 };
 
-const requestInitialHardwareState = async () => {
+const requestInitialHardwareState = async ({ resetState = true } = {}) => {
   if (!App._.connected || !App._.servicesReady) return;
 
   clearStartupTimer();
-  markRealStateWaiting();
-  _.energy_meter.timedelta = null;
-  _.energy_meter.lastUpdate = null;
-  _.energy_meter.raw = {};
-  _.energy_meter.measured = {};
-  _.energy_meter.projected = {};
-  _.agent.enabled = false;
+  if (resetState) {
+    markRealStateWaiting();
+    _.energy_meter.timedelta = null;
+    _.energy_meter.lastUpdate = null;
+    _.energy_meter.raw = {};
+    _.energy_meter.measured = {};
+    _.energy_meter.projected = {};
+    _.agent.enabled = false;
+  }
 
   _.startup.phase = 'requesting';
   _.startup.message = 'Requesting fresh Shelly measurements, Branch A, Branch-B Shelly relay states and battery status…';
@@ -986,9 +1032,53 @@ const bindRuntime = async () => {
   await requestInitialHardwareState();
 };
 
+const refreshHardwareStatePreservingState = async () => {
+  if (!App._.connected || !App._.servicesReady || !boundRuntime) return false;
+
+  // RECHECK is a refresh, not a cold reset.  Keep the last known execution and
+  // Building-Twin state visible while asking every service for fresh truth.
+  const previousPhase = _.startup.phase;
+  const previousMessage = _.startup.message;
+  _.startup.message = 'RECHECK requested. Preserving current states while fresh hardware status is requested…';
+
+  try {
+    const mqttStatus = await App.MqttService?.status?.();
+    _.mqtt.connected = mqttStatus?.connected === true;
+    _.mqtt.lastHeartbeatAt = mqttStatus?.last_heartbeat_at ?? _.mqtt.lastHeartbeatAt;
+  } catch {
+    // Keep the last known status.  A normal freshness timeout will still expose
+    // an unavailable source; RECHECK itself must not manufacture OFF/0 values.
+  }
+
+  await Promise.allSettled([
+    App.EnergyMeterService?.requestUpdate?.(),
+    App.WallboxService?.requestUpdate?.(),
+    App.BatteryService?.requestUpdate?.(),
+    App.EspService?.requestUpdate?.(),
+  ]);
+
+  // Do not rewrite startup.requestedAt: that timestamp belongs to cold-start
+  // gating.  Existing data remains visible and new events update atomically.
+  _.startup.phase = previousPhase === 'ready' ? 'ready' : previousPhase;
+  _.startup.message = previousPhase === 'ready'
+    ? 'RECHECK sent. Current state is preserved until fresh hardware status arrives.'
+    : previousMessage;
+  return true;
+};
+
 const retryInitialization = async () => {
   App.ensureConnected();
-  if (App._.connected && App._.servicesReady) await bindRuntime();
+  if (!App._.connected || !App._.servicesReady) return;
+
+  if (boundRuntime && _.startup.completedAt !== null) {
+    await refreshHardwareStatePreservingState();
+    return;
+  }
+
+  // Initial recovery before the first successful READY snapshot still uses the
+  // fail-closed cold-start handshake.
+  if (!boundRuntime) await bindRuntime();
+  else await requestInitialHardwareState({ resetState: true });
 };
 
 const init = () => {

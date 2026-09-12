@@ -5,7 +5,7 @@ const adapter = fs.readFileSync(new URL('../client/src/HeatpumpStatusAdapter.js'
 if (!dashboard.includes("deriveHeatpumpStatus, heatpumpCommandToTwinLevel") || !dashboard.includes("from '../HeatpumpStatusAdapter.js'")) {
   throw new Error('SimpleDashboard must use HeatpumpStatusAdapter.');
 }
-if (!dashboard.includes('const interpreted = deriveHeatpumpStatus(payload, _.heatpump.commanded);')) {
+if (!dashboard.includes('const commanded = _.heatpump.commanded;') || !dashboard.includes('const interpreted = deriveHeatpumpStatus(payload, commanded);')) {
   throw new Error('Branch-A status handler must pass the active Pi5 command into the state-aware adapter.');
 }
 if (!dashboard.includes('_.heatpump.twinLevel = interpreted.twinLevel')) {
