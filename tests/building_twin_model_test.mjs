@@ -17,7 +17,7 @@ assert(idle.a === 0 && idle.b === 0 && idle.c === 0, `All devices OFF must proje
 
 const hpOn = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 0, batteryCharging: false });
 assert(hpOn.a === 60 && hpOn.b === 0 && hpOn.c === 0, `Branch-A full load must be 60/0/0 A, got ${JSON.stringify(hpOn)}`);
-assert(heatpumpProjectedCurrentA(5) === 60, 'Heatpump level 5 must map to the aggregate 60 A building-equivalent current.');
+assert(heatpumpProjectedCurrentA(5) === 60, 'Heatpump level 5 must map to the aggregate 60 A device-model current.');
 
 const relay0 = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 1, batteryCharging: false });
 assert(relay0.b === 32, `One Branch-B relay must represent two 16 A wallboxes, got ${JSON.stringify(relay0)}`);

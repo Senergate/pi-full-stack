@@ -14,9 +14,6 @@
 
 export const BUILDING_TARGETS = Object.freeze({
   nominalVoltageV: 230,
-  // DEMO building-equivalent capacity. The physical ATV12 remains capped at 50 Hz.
-  // 60 A is selected so Branch A at max alone exceeds 2.3% modeled VUF
-  // with the current symmetric Weak-Grid Demo feeder while staying above 207 V.
   heatpumpMaxCurrentA: 60,
   wallboxMaxCurrentA: 64,
   batteryMaxCurrentA: 40,
@@ -87,13 +84,10 @@ const getAsset = (profiles, name) => {
 
   if (!configured || typeof configured !== 'object') return fallback;
 
-  // Important runtime fallback rule:
-  // ElectricalCalibrationService intentionally returns an asset object even
-  // before real calibration, but its points map is empty.  Treating that empty
-  // map as authoritative made every modeled asset resolve to missing_point and
-  // therefore P=Q=0.  Merge normalized fallback points underneath any supplied
-  // profile so an uncalibrated system remains functional, while real calibrated
-  // points still override the fallback state-by-state.
+  // A backend profile may intentionally contain an empty points:{} object
+  // before real P/Q calibration. Merge the fallback points instead of letting
+  // the empty object erase the Building-Twin model. Real calibrated points,
+  // when present, override the corresponding fallback points by key.
   return {
     ...fallback,
     ...configured,

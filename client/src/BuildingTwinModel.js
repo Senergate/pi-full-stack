@@ -22,8 +22,6 @@ export const BUILDING_TWIN_CONFIG = Object.freeze({
   branchAEquivalentHeatpumps: 2,
   heatpumpLevels: 5,
   // Aggregate building-scale contribution of the 2 equivalent heat-pump modules.
-  // DEMO building-equivalent aggregate for Branch A. This does not change
-  // the physical ATV12 50 Hz maximum; it only changes the modeled building capacity.
   heatpumpAggregateMaxCurrentA: 60,
 
   branchBEquivalentWallboxesPerRelay: 2,
@@ -33,7 +31,7 @@ export const BUILDING_TWIN_CONFIG = Object.freeze({
   // Independent modeled contribution for the current battery prototype state.
   batteryChargeCurrentA: 40,
 
-  provenance: 'demo_equivalent_device_model_v4_60_64_40_branchAB_vuf23',
+  provenance: 'demo_equivalent_device_model_v3_60_64_40',
 });
 
 const clampInt = (value, min, max) => {

@@ -20,5 +20,5 @@ assert(Math.abs(mag.c - 40) < 1e-6, `Battery full-scale must target 40 A, got ${
 const hp3 = modelBuildingPowers({profiles:DEFAULT_ELECTRICAL_PROFILES,heatpumpLevel:3,wallboxMask:0,batteryCharging:false,phaseVoltages:{a:230,b:230,c:230}});
 const i3 = PhasorCalculator.buildCurrentPhasorsFromComplexPower(hp3.powers, V);
 const hp3A = PhasorCalculator.complexMagnitude(i3.a);
-assert(Math.abs(hp3A - 28.8) < 1e-6, `Fallback HP profile must be non-linear (level3=48% of 60 A => 28.8 A), got ${hp3A}`);
+assert(Math.abs(hp3A - 28.8) < 1e-6, `Fallback HP profile must be non-linear (level3=48% => 28.8 A), got ${hp3A}`);
 console.log('pq_profile_model_test: PASS');
