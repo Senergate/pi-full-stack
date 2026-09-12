@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "modelVersion": "1.5-pq-calibration",
+  "updatedAt": null,
+  "baseline": null,
+  "devices": {
+    "heatpump": { "phase": "a", "qSign": "lagging", "quality": "uncalibrated", "points": {} },
+    "wallbox": { "phase": "b", "qSign": "near_unity", "quality": "uncalibrated", "points": {} },
+    "battery": { "phase": "c", "qSign": "near_unity", "quality": "uncalibrated", "points": {} }
+  }
+}
