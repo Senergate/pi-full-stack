@@ -81,8 +81,28 @@ const finiteOrNull = value => {
   return Number.isFinite(n) ? n : null;
 };
 
-const getAsset = (profiles, name) =>
-  profiles?.assets?.[name] ?? DEFAULT_ELECTRICAL_PROFILES.assets[name];
+const getAsset = (profiles, name) => {
+  const fallback = DEFAULT_ELECTRICAL_PROFILES.assets[name];
+  const configured = profiles?.assets?.[name];
+
+  if (!configured || typeof configured !== 'object') return fallback;
+
+  // Important runtime fallback rule:
+  // ElectricalCalibrationService intentionally returns an asset object even
+  // before real calibration, but its points map is empty.  Treating that empty
+  // map as authoritative made every modeled asset resolve to missing_point and
+  // therefore P=Q=0.  Merge normalized fallback points underneath any supplied
+  // profile so an uncalibrated system remains functional, while real calibrated
+  // points still override the fallback state-by-state.
+  return {
+    ...fallback,
+    ...configured,
+    points: {
+      ...(fallback?.points ?? {}),
+      ...(configured?.points ?? {}),
+    },
+  };
+};
 
 const pointFor = (asset, state) => {
   const key = String(state);

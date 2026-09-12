@@ -74,7 +74,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.2-branchAB-vuf23';
+const FRONTEND_BUILD_VERSION = 'v1.5.3-fallback-profile-fix';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
