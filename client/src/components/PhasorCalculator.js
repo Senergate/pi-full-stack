@@ -137,6 +137,134 @@ const PhasorCalculator = {
     ),
   }),
 
+  // Complex conjugate.
+  complexConjugate: value => ({ re: value.re, im: -value.im }),
+
+  // Divide complex numbers a / b.
+  complexDivide: (a, b) => {
+    const denominator = b.re * b.re + b.im * b.im;
+    if (!Number.isFinite(denominator) || denominator <= Number.EPSILON) return null;
+    return {
+      re: (a.re * b.re + a.im * b.im) / denominator,
+      im: (a.im * b.re - a.re * b.im) / denominator,
+    };
+  },
+
+  complexAngleDegrees: value => (Math.atan2(value.im, value.re) * 180) / Math.PI,
+
+  // Build fundamental current phasors from complex power using S = V * conj(I).
+  // Therefore I = conj(S / V). P is in W, Q in var, V in volts -> I in A.
+  buildCurrentPhasorsFromComplexPower: (powers, voltagePhasors) => {
+    const result = {};
+    for (const phase of ['a', 'b', 'c']) {
+      const p = finiteOrNull(powers?.[phase]?.p);
+      const q = finiteOrNull(powers?.[phase]?.q);
+      const voltage = voltagePhasors?.[phase];
+      if (p === null || q === null || !voltage) return null;
+      const quotient = PhasorCalculator.complexDivide({ re: p, im: q }, voltage);
+      if (!quotient) return null;
+      result[phase] = PhasorCalculator.complexConjugate(quotient);
+    }
+    return result;
+  },
+
+  // Incremental PCC model used by v1.5. The measured/captured OFF-state PCC
+  // voltage is the baseline. Only the additional controllable building load is
+  // propagated through the modeled feeder impedance. This avoids subtracting
+  // the upstream voltage drop twice from an already measured PCC voltage.
+  analyzeVUFIncrementalPQ: ({
+    powers,
+    baselineVoltages = { a: 230, b: 230, c: 230 },
+    baselineAngles = { a: 0, b: -120, c: 120 },
+    resistance = { a: 0.03, b: 0.03, c: 0.03 },
+    reactance = { a: 0, b: 0, c: 0 },
+    neutralResistance = 0,
+    neutralReactance = 0,
+    voltageLimits = { min: 207, max: 253 },
+  }) => {
+    const requiredValues = [
+      ...['a', 'b', 'c'].flatMap(phase => [
+        finiteOrNull(powers?.[phase]?.p),
+        finiteOrNull(powers?.[phase]?.q),
+        finiteOrNull(baselineVoltages?.[phase]),
+        finiteOrNull(baselineAngles?.[phase]),
+        finiteOrNull(resistance?.[phase]),
+        finiteOrNull(reactance?.[phase]),
+      ]),
+      finiteOrNull(neutralResistance),
+      finiteOrNull(neutralReactance),
+    ];
+
+    if (requiredValues.some(value => value === null)) {
+      return {
+        vufPercent: null,
+        baselineVufPercent: null,
+        error: 'Missing or invalid incremental P/Q VUF input.',
+      };
+    }
+
+    const baselineVoltagePhasors = PhasorCalculator.buildSourceVoltagePhasors(baselineVoltages, baselineAngles);
+    const currentPhasors = PhasorCalculator.buildCurrentPhasorsFromComplexPower(powers, baselineVoltagePhasors);
+    if (!currentPhasors) {
+      return { vufPercent: null, baselineVufPercent: null, error: 'Unable to build current phasors from P/Q.' };
+    }
+
+    const impedances = PhasorCalculator.buildLineImpedances(resistance, reactance);
+    const voltageDrops = PhasorCalculator.computeVoltageDrops(currentPhasors, impedances);
+    const neutralImpedance = PhasorCalculator.buildNeutralImpedance(neutralResistance, neutralReactance);
+    const neutralCurrentPhasor = PhasorCalculator.computeNeutralCurrentPhasor(currentPhasors);
+    const neutralVoltageDrop = PhasorCalculator.computeNeutralVoltageDrop(neutralCurrentPhasor, neutralImpedance);
+    const loadVoltagePhasors = PhasorCalculator.computeLoadVoltages(
+      baselineVoltagePhasors,
+      voltageDrops,
+      neutralVoltageDrop
+    );
+
+    const baselineSequenceComponents = PhasorCalculator.computeSequenceComponents(baselineVoltagePhasors);
+    const baselineVuf = PhasorCalculator.computeVUF(baselineSequenceComponents);
+    const sequenceComponents = PhasorCalculator.computeSequenceComponents(loadVoltagePhasors);
+    const vuf = PhasorCalculator.computeVUF(sequenceComponents);
+
+    const loadVoltageMagnitudes = Object.fromEntries(
+      ['a', 'b', 'c'].map(phase => [phase, PhasorCalculator.complexMagnitude(loadVoltagePhasors[phase])])
+    );
+    const loadVoltageAngles = Object.fromEntries(
+      ['a', 'b', 'c'].map(phase => [phase, PhasorCalculator.complexAngleDegrees(loadVoltagePhasors[phase])])
+    );
+    const currentMagnitudes = Object.fromEntries(
+      ['a', 'b', 'c'].map(phase => [phase, PhasorCalculator.complexMagnitude(currentPhasors[phase])])
+    );
+
+    const minVoltage = finiteOrNull(voltageLimits?.min) ?? 207;
+    const maxVoltage = finiteOrNull(voltageLimits?.max) ?? 253;
+    const voltageSafe = Object.values(loadVoltageMagnitudes).every(v => v >= minVoltage && v <= maxVoltage);
+
+    return {
+      ...vuf,
+      baselineVufPercent: baselineVuf.vufPercent,
+      scenarioDeltaVufPercent:
+        vuf.vufPercent === null || baselineVuf.vufPercent === null
+          ? null
+          : vuf.vufPercent - baselineVuf.vufPercent,
+      baselineVoltagePhasors,
+      currentPhasors,
+      currentMagnitudes,
+      impedances,
+      neutralImpedance,
+      neutralCurrentPhasor,
+      neutralVoltageDrop,
+      voltageDrops,
+      loadVoltagePhasors,
+      loadVoltageMagnitudes,
+      loadVoltageAngles,
+      sequenceComponents,
+      baselineSequenceComponents,
+      voltageSafe,
+      voltageLimits: { min: minVoltage, max: maxVoltage },
+      error: vuf.error,
+    };
+  },
+
   // Compute VUF from positive- and negative-sequence voltage.
   computeVUF: sequenceComponents => {
     const positiveSequenceMagnitude = PhasorCalculator.complexMagnitude(sequenceComponents.positive);

@@ -1,8 +1,13 @@
-import { classifyVuf, formatVufPercent, roundedVuf } from '../client/src/VufPresentation.js';
-function assert(c,m){if(!c) throw new Error(m)}
-assert(formatVufPercent(1.16)==='1.2%','one decimal VUF required');
-assert(formatVufPercent(2.04)==='2.0%','2.04 must display 2.0%');
-assert(classifyVuf(2.04).label==='Warning','classification must use same rounded 2.0% value');
-assert(formatVufPercent(2.06)==='2.1%' && classifyVuf(2.06).label==='Critical','2.06 must display 2.1% Critical');
-assert(roundedVuf(1.94)===1.9,'rounding contract mismatch');
+import { classifyVuf, formatVufPercent } from '../client/src/VufPresentation.js';
+
+function assert(condition, message) { if (!condition) throw new Error(message); }
+
+assert(formatVufPercent(1.16) === '1.2%', 'VUF display must use one decimal place.');
+assert(formatVufPercent(1.94) === '1.9%', 'VUF rounding must be shared and stable.');
+assert(classifyVuf(0.9).label === 'Balanced', '<1.0% must be Balanced.');
+assert(classifyVuf(1.0).label === 'Warning', '1.0–2.0% must be Warning.');
+assert(classifyVuf(2.0).label === 'Warning', 'Exactly 2.0% remains Warning; critical is >2.0%.');
+assert(classifyVuf(2.01).label === 'Warning', '2.01% rounds to displayed 2.0%, so displayed status must remain Warning.');
+assert(classifyVuf(2.06).label === 'Critical', '2.06% displays 2.1%, so status must be Critical.');
+
 console.log('vuf_presentation_consistency_test: PASS');

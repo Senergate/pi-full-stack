@@ -26,5 +26,4 @@ await EspService.heatpump({ mode: 'start', level: 5, target_hz: 50 });
 await EspService.heatpump(0.8);
 assert(mqttCalls.map(x => x[1]).join('|') === 'stop,0|start,0|start,30|start,50', `unexpected payloads ${JSON.stringify(mqttCalls)}`);
 
-
 console.log('heatpump_command_contract_test: PASS');

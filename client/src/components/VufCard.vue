@@ -13,7 +13,7 @@
       aria-label="Voltage unbalance factor"
       :aria-valuenow="safeVuf"
       aria-valuemin="0"
-      aria-valuemax="3.5"
+      aria-valuemax="4"
     >
       <div class="gauge-fill" :style="{ width: gaugeWidth }" />
     </div>
@@ -22,14 +22,14 @@
 
     <div class="vuf-breakdown">
       <span>Total estimated: {{ formatPercent(safeVuf) }}</span>
-      <span>Baseline grid: {{ formattedBaseline }}</span>
+      <span>Baseline PCC: {{ formattedBaseline }}</span>
       <span>Scenario ΔVUF: {{ formattedLoadImpact }}</span>
     </div>
 
     <div class="history">
       <div class="history-header">
         <span>VUF · last 10 seconds</span>
-        <span class="history-range">0–3.5%</span>
+        <span class="history-range">0–4.0%</span>
       </div>
 
       <div ref="graphContainer" class="graph-container">
@@ -68,7 +68,7 @@ const GRAPH_HEIGHT = 150;
 const SECONDS_VISIBLE = 10;
 
 const MIN_VUF = 0;
-const MAX_VUF = 3.5;
+const MAX_VUF = 4.0;
 
 const MAX_POINTS = 300;
 
@@ -81,14 +81,24 @@ const graphState = reactive({
 });
 
 const safeVuf = computed(() => numberOrNullVuf(props.vuf));
+
 const formatPercent = value => formatVufPercent(value);
 const formattedVuf = computed(() => formatVufPercent(safeVuf.value));
 const formattedBaseline = computed(() => formatVufPercent(props.baselineVuf));
 const formattedLoadImpact = computed(() => formatVufPercent(props.loadImpactVuf));
+
 const status = computed(() => classifyVuf(safeVuf.value));
 const statusLabel = computed(() => status.value.label.toUpperCase());
-const statusClass = computed(() => status.value.className === 'critical' ? 'bad' : status.value.className === 'warning' ? 'warn' : status.value.className === 'balanced' ? 'good' : 'unknown');
-const gaugeWidth = computed(() => safeVuf.value === null ? '0%' : `${Math.min(100, (safeVuf.value / MAX_VUF) * 100)}%`);
+const statusClass = computed(() => {
+  if (status.value.className === 'critical') return 'bad';
+  if (status.value.className === 'warning') return 'warn';
+  if (status.value.className === 'balanced') return 'good';
+  return 'unknown';
+});
+
+const gaugeWidth = computed(() =>
+  safeVuf.value === null ? '0%' : `${Math.min(100, (safeVuf.value / 4) * 100)}%`
+);
 
 const addPoint = value => {
   if (value === null || value === undefined || value === '') {
@@ -130,7 +140,7 @@ const resizeCanvas = () => {
 };
 
 const drawGrid = (ctx, mapX, mapY, padding, width, height, now) => {
-  const yValues = [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5];
+  const yValues = [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4];
 
   ctx.font = '11px sans-serif';
   ctx.textAlign = 'right';

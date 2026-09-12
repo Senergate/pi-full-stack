@@ -12,10 +12,10 @@ if (!model.includes('batteryChargeCurrentA: 40')) throw new Error('40 A battery 
 if (!model.includes('branchBEquivalentWallboxesPerRelay: 2')) throw new Error('Branch-B equivalent-device mapping missing.');
 if (!dashboard.includes('max: 100')) throw new Error('Building-Twin current chart must use 0–100 A range.');
 if (!dashboard.includes("preset: 'demo'")) throw new Error('Demo feeder must be the default modeled feeder.');
-if (!dashboard.includes("rPhase: 0.40") || !dashboard.includes("rNeutral: 0.30")) throw new Error('Demo feeder impedance parameters missing.');
-if (!dashboard.includes('const controlReady = computed(() => measurementFresh.value && branchAReady.value)')) {
+if (!dashboard.includes('rPhase: 0.26') || !dashboard.includes('rNeutral: 0.03')) throw new Error('v1.5 Weak-Grid Demo feeder parameters missing.');
+if (!dashboard.includes('measurementFresh.value && branchAReady.value && _.electricalModel.calibration?.running !== true')) {
   throw new Error('Control regression guard was lost.');
 }
-if (!dashboard.includes('projectBuildingCurrents({')) throw new Error('Dashboard and predictor must use shared equivalent-device model.');
+if (!dashboard.includes('modelBuildingPowers({')) throw new Error('Dashboard and predictor must use the shared P/Q equivalent-device model.');
 
 console.log('equivalent_device_no_gain_static_test: PASS');

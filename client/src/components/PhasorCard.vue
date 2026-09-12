@@ -2,10 +2,10 @@
   <section class="phasor-card">
     <div class="card-header">
       <div>
-        <div class="eyebrow">Voltage Phasor Estimate</div>
+        <div class="eyebrow">Projected PCC Voltage Phasors · magnitude + calculated angle</div>
       </div>
 
-      <span class="badge">207–253 V guard</span>
+      <span class="badge">225–240 V</span>
     </div>
 
     <div class="phasor-container">
@@ -84,6 +84,7 @@
           class="phase"
         >
           <line
+            v-if="phase.valid"
             :x1="CENTER"
             :y1="CENTER"
             :x2="phase.x"
@@ -93,6 +94,7 @@
           />
 
           <circle
+            v-if="phase.valid"
             :cx="phase.x"
             :cy="phase.y"
             r="6"
@@ -101,6 +103,7 @@
           />
 
           <g
+            v-if="phase.valid"
             :transform="`translate(${phase.valueLabelX}, ${phase.valueLabelY})`"
           >
             <rect
@@ -120,7 +123,7 @@
               text-anchor="middle"
               dominant-baseline="middle"
             >
-              {{ phase.voltage.toFixed(1) }} V
+              {{ formatVoltage(phase.voltage) }}
             </text>
           </g>
         </g>
@@ -151,11 +154,11 @@
         </span>
 
         <strong>
-          {{ phase.voltage.toFixed(1) }} V
+          {{ formatVoltage(phase.voltage) }}
         </strong>
 
         <span class="angle-value">
-          {{ formatAngle(phase.angle) }}
+          {{ phase.valid ? formatAngle(phase.angle) : '—' }}
         </span>
       </div>
     </div>
@@ -181,7 +184,7 @@ const props = defineProps({
   },
 
   /*
-   * Same shape as _.vuf.sourceAngle:
+   * Calculated load-voltage phasor angles from the same complex phasors used for VUF:
    *
    * {
    *   a: 0,
@@ -206,8 +209,8 @@ const CENTER = 200
 const INNER_RADIUS = 50
 const OUTER_RADIUS = 150
 
-const MIN_VOLTAGE = 200
-const MAX_VOLTAGE = 255
+const MIN_VOLTAGE = 225
+const MAX_VOLTAGE = 240
 
 const phaseDefinitions = [
   {
@@ -228,7 +231,7 @@ const phaseDefinitions = [
 ]
 
 const voltageRings = computed(() => {
-  return [207, 220, 230, 240, 253].map(value => ({
+  return [225, 230, 235, 240].map(value => ({
     value,
     radius: voltageToRadius(value),
   }))
@@ -352,41 +355,21 @@ const idealPhases = computed(() => {
   })
 })
 
+const finiteOrNull = value => {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
 const phasors = computed(() => {
   return phaseDefinitions.map(
     definition => {
-      const voltageValue =
-        Number(
-          props.voltages?.[
-            definition.key
-          ],
-        )
+      const voltage = finiteOrNull(props.voltages?.[definition.key])
+      const angle = finiteOrNull(props.angles?.[definition.key])
+      const valid = voltage !== null && angle !== null
 
-      const angleValue =
-        Number(
-          props.angles?.[
-            definition.key
-          ],
-        )
-
-      const voltage =
-        Number.isFinite(voltageValue)
-          ? voltageValue
-          : 230
-
-      const angle =
-        Number.isFinite(angleValue)
-          ? angleValue
-          : 0
-
-      const radius =
-        voltageToRadius(voltage)
-
-      const endpoint =
-        pointFor(
-          radius,
-          angle,
-        )
+      const radius = valid ? voltageToRadius(voltage) : 0
+      const endpoint = valid ? pointFor(radius, angle) : { x: CENTER, y: CENTER }
 
       /*
        * Put the value label slightly beyond
@@ -403,6 +386,7 @@ const phasors = computed(() => {
 
         voltage,
         angle,
+        valid,
         radius,
 
         x: endpoint.x,
@@ -417,6 +401,12 @@ const phasors = computed(() => {
     },
   )
 })
+
+
+const formatVoltage = voltage => {
+  const value = finiteOrNull(voltage)
+  return value === null ? '—' : `${value.toFixed(1)} V`
+}
 
 const formatAngle = angle => {
   const value =

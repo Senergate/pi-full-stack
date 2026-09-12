@@ -66,6 +66,10 @@ const parseJson = message => {
 
 const EspService = {
   name: 'EspService',
+  latestBranchAStatus: null,
+  latestBranchAAck: null,
+
+  _latestBranchA: () => EspService.latestBranchAStatus,
 
   heatpump: async command => {
     const normalized = normalizeHeatpumpCommand(command);
@@ -80,25 +84,9 @@ const EspService = {
     return normalized;
   },
 
-  wallbox: async (id, state) => {
-    const relayId = Number(id);
-    const output = state === true;
-    console.log('wallbox->', { relayId, output });
-    mqtt().publish(`wallbox/relay/${relayId}`, output ? '1' : '0');
-    return { accepted: true, relayId, output };
-  },
-
-  bypass: async value => {
-    const enabled = value === true;
-    console.log('wallbox bypass', enabled);
-    mqtt().publish('senergate/config/branchB/compat_safety_bypass', enabled ? '1' : '0');
-    return { accepted: true, enabled };
-  },
-
   requestUpdate: async () => {
     mqtt().publish('senergate/sys/request/status', '1');
     mqtt().publish('senergate/sys/request/branchA/status', '1');
-    mqtt().publish('senergate/sys/request/branchB/status', '1');
     return { accepted: true };
   },
 
@@ -107,8 +95,6 @@ const EspService = {
     for (const topic of [
       'senergate/state/branchA/status',
       'senergate/state/branchA/ack',
-      'senergate/state/branchB/status',
-      'senergate/state/branchB/ack',
     ]) {
       bus.subscribe(topic, { qos: 1 }, err => {
         if (err) console.error(`Subscribe failed for ${topic}:`, err);
@@ -119,10 +105,14 @@ const EspService = {
       const payload = parseJson(message);
       if (!payload) return;
 
-      if (topic === 'senergate/state/branchA/status') server.emitServiceEvent('EspService', 'branchA', payload);
-      if (topic === 'senergate/state/branchA/ack') server.emitServiceEvent('EspService', 'branchA_ack', payload);
-      if (topic === 'senergate/state/branchB/status') server.emitServiceEvent('EspService', 'branchB', payload);
-      if (topic === 'senergate/state/branchB/ack') server.emitServiceEvent('EspService', 'branchB_ack', payload);
+      if (topic === 'senergate/state/branchA/status') {
+        EspService.latestBranchAStatus = { ts_ms: Date.now(), payload };
+        server.emitServiceEvent('EspService', 'branchA', payload);
+      }
+      if (topic === 'senergate/state/branchA/ack') {
+        EspService.latestBranchAAck = { ts_ms: Date.now(), payload };
+        server.emitServiceEvent('EspService', 'branchA_ack', payload);
+      }
     });
   },
 };

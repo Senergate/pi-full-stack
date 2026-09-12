@@ -3,8 +3,8 @@ import fs from 'node:fs';
 const dashboard = fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue', import.meta.url), 'utf8');
 const model = fs.readFileSync(new URL('../client/src/BuildingTwinModel.js', import.meta.url), 'utf8');
 
-if (!dashboard.includes('const controlReady = computed(() => measurementFresh.value && branchAReady.value)')) {
-  throw new Error('General control gate must match the previous working rule: measurementFresh && branchAReady.');
+if (!dashboard.includes('measurementFresh.value && branchAReady.value && _.electricalModel.calibration?.running !== true')) {
+  throw new Error('General control gate must preserve measurementFresh && branchAReady and add only the explicit calibration lock.');
 }
 if (dashboard.includes("_.startup.phase === 'ready' && measurementFresh.value && branchAReady.value && branchBReady.value")) {
   throw new Error('Branch B/startup must not globally block all device controls.');

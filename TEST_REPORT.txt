@@ -1,0 +1,29 @@
+agent_candidate_strategy_static_test.mjs: PASS
+agent_manual_patch_static_test.mjs: PASS
+agent_voltage_guard_static_test.mjs: PASS
+branchA_immediate_twin_projection_test.mjs: PASS
+branchA_status_adapter_static_test.mjs: PASS
+branchA_status_target_projection_test.mjs: PASS
+branchb_shelly_readiness_static_test.mjs: PASS
+bugfix3_smoke_test.mjs: PASS
+building_twin_model_test.mjs: PASS
+control_regression_restore_static_test.mjs: PASS
+current_card_measured_modeled_static_test.mjs: PASS
+electrical_calibration_service_static_test.mjs: PASS
+equivalent_device_no_gain_static_test.mjs: PASS
+frontend_build_version_static_test.mjs: PASS
+heatpump_command_contract_test.mjs: PASS
+incremental_pcc_model_static_test.mjs: PASS
+p03_branchA_semantics_restore_test.mjs: PASS
+pending_timeout_static_test.mjs: PASS
+pi5_heartbeat_static_test.mjs: PASS
+pq_profile_model_test.mjs: PASS
+real_hardware_vuf_demo_test.mjs: PASS
+real_only_frontend_static_test.mjs: PASS
+startup_display_null_gate_static_test.mjs: PASS
+startup_initialization_static_test.mjs: PASS
+static_heatpump_no_legacy_path_test.mjs: PASS
+vue_import_usage_static_test.mjs: PASS
+vuf_presentation_consistency_test.mjs: PASS
+TOTAL=27
+ALL_PASS=yes

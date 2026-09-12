@@ -17,10 +17,14 @@ const normalizeSwitchStatus = (topic, payload) => ({
 
 const WallboxService = {
   name: 'WallboxService',
+  latest: { 0: null, 1: null },
+
+  _latestRelays: () => ({ ...WallboxService.latest }),
 
   set: (id, state) => {
     const bus = WallboxService.server.services.get('MqttService').bus;
     const relayId = Number(id);
+    if (![0, 1].includes(relayId)) return { accepted: false, reason: 'invalid_relay_id', id: relayId };
     const output = state === true;
     bus.publish(`branch-b-shelly/command/switch:${relayId}`, output ? 'on' : 'off');
     return { accepted: true, id: relayId, state: output };
@@ -44,6 +48,7 @@ const WallboxService = {
       if (!topic.startsWith('branch-b-shelly/status/switch:')) return;
       try {
         const payload = normalizeSwitchStatus(topic, JSON.parse(message.toString()));
+        if ([0, 1].includes(payload.id)) WallboxService.latest[payload.id] = { ts_ms: Date.now(), payload };
         server.emitServiceEvent('WallboxService', 'data', payload);
       } catch (err) {
         console.error(`Invalid MQTT payload on ${topic}:`, err);

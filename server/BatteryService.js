@@ -12,6 +12,9 @@ const normalizeSwitchStatus = payload => ({
 
 const BatteryService = {
   name: 'BatteryService',
+  latestStatus: null,
+
+  _latest: () => BatteryService.latestStatus,
 
   // Senergate decision: true = battery charging ON, false = charger OFF.
   // Do not encode discharge with this boolean; use a future charge/discharge/idle enum.
@@ -39,6 +42,7 @@ const BatteryService = {
       if (!topic.startsWith('shelly-battery/status/switch:')) return;
       try {
         const payload = normalizeSwitchStatus(JSON.parse(message.toString()));
+        BatteryService.latestStatus = { ts_ms: Date.now(), payload };
         server.emitServiceEvent('BatteryService', 'data', payload);
       } catch (err) {
         console.error(`Invalid MQTT payload on ${topic}:`, err);

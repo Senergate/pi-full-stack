@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "provenance": "example_only_not_calibrated",
+  "generated_at": null,
+  "baseline": {
+    "calibrated": false,
+    "source": "nominal_fallback",
+    "voltages": { "a": 230, "b": 230, "c": 230 }
+  },
+  "assets": {
+    "heatpump": {
+      "phase": "a",
+      "target_current_a": 40,
+      "q_sign": "lagging",
+      "points": {}
+    },
+    "wallbox": {
+      "phase": "b",
+      "target_current_a": 64,
+      "q_sign": "near_unity",
+      "points": {}
+    },
+    "battery": {
+      "phase": "c",
+      "target_current_a": 40,
+      "q_sign": "near_unity",
+      "points": {}
+    }
+  }
+}

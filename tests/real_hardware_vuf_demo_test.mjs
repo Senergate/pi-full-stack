@@ -1,28 +1,42 @@
 import PhasorCalculator from '../client/src/components/PhasorCalculator.js';
-import { projectBuildingCurrents } from '../client/src/BuildingTwinModel.js';
+import {
+  DEFAULT_ELECTRICAL_PROFILES,
+  modelBuildingPowers,
+} from '../client/src/ElectricalProfileModel.js';
 
 function assert(condition, message) { if (!condition) throw new Error(message); }
 
-const common = {
-  powerFactors: { a: 0.96, b: 0.98, c: 0.97 },
-  sourceVoltages: { a: 230, b: 230, c: 230 },
-  sourceAngles: { a: 0, b: -120, c: 120 },
-  resistance: { a: 0.40, b: 0.40, c: 0.40 },
-  reactance: { a: 0.15, b: 0.15, c: 0.15 },
-  neutralResistance: 0.30,
-  neutralReactance: 0.10,
+const feeder = {
+  resistance: { a: 0.26, b: 0.26, c: 0.26 },
+  reactance: { a: 0.091, b: 0.091, c: 0.091 },
+  neutralResistance: 0.03,
+  neutralReactance: 0.01,
 };
 
-const vuf = currents => PhasorCalculator.analyzeVUF({ currents, ...common }).vufPercent;
-const idle = projectBuildingCurrents({ heatpumpLevel: 0, wallboxMask: 0, batteryCharging: false });
-const branchA = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 0, batteryCharging: false });
-const compensated = projectBuildingCurrents({ heatpumpLevel: 5, wallboxMask: 1, batteryCharging: true });
+const analyze = state => {
+  const model = modelBuildingPowers({
+    profiles: DEFAULT_ELECTRICAL_PROFILES,
+    ...state,
+    phaseVoltages: { a: 230, b: 230, c: 230 },
+  });
+  return PhasorCalculator.analyzeVUFIncrementalPQ({
+    powers: model.powers,
+    baselineVoltages: { a: 230, b: 230, c: 230 },
+    baselineAngles: { a: 0, b: -120, c: 120 },
+    ...feeder,
+    voltageLimits: { min: 207, max: 253 },
+  });
+};
 
-assert(idle.a === 0 && idle.b === 0 && idle.c === 0, 'Idle projected currents must be zero.');
-assert(vuf(branchA) > 2.0, `Demo feeder + equivalent Branch A must demonstrate >2% modeled VUF, got ${vuf(branchA)}`);
-assert(vuf(compensated) < 1.0, `Branch B + battery compensation should strongly reduce modeled VUF, got ${vuf(compensated)}`);
+const idle = analyze({ heatpumpLevel: 0, wallboxMask: 0, batteryCharging: false });
+const severe = analyze({ heatpumpLevel: 0, wallboxMask: 3, batteryCharging: false });
+const compensated = analyze({ heatpumpLevel: 5, wallboxMask: 3, batteryCharging: true });
+
+assert(Math.abs(idle.vufPercent) < 1e-9, `Ideal OFF baseline should be ~0% VUF, got ${idle.vufPercent}`);
+assert(severe.vufPercent > 2.5, `Weak-Grid Demo should reach >2.5% modeled VUF for a severe 64 A single-phase scenario, got ${severe.vufPercent}`);
+assert(severe.voltageSafe === true, `Demo >2.5% point must remain inside 207–253 V guard, got ${JSON.stringify(severe.loadVoltageMagnitudes)}`);
+assert(compensated.vufPercent < severe.vufPercent, 'Adding L1/L3 flexible capacity should reduce the severe L2-only VUF scenario.');
 
 console.log('real_hardware_vuf_demo_test: PASS');
-console.log(`idle -> ${JSON.stringify(idle)}`);
-console.log(`Branch A full -> ${JSON.stringify(branchA)}, VUF=${vuf(branchA).toFixed(3)}%`);
-console.log(`Branch B R0 + battery -> ${JSON.stringify(compensated)}, VUF=${vuf(compensated).toFixed(3)}%`);
+console.log(`severe WB-only VUF=${severe.vufPercent.toFixed(3)}%, voltages=${JSON.stringify(severe.loadVoltageMagnitudes)}`);
+console.log(`all-max VUF=${compensated.vufPercent.toFixed(3)}%`);
