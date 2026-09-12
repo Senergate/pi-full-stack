@@ -12,7 +12,8 @@ const SAMPLE_WINDOW_MS = 10000;
 const MIN_SHELLY_SAMPLES = 4;
 
 const TARGETS = Object.freeze({
-  heatpump: { phase: 'a', target_current_a: 40, q_sign: 'lagging' },
+  // Building-scale target only; physical calibration still measures the real prototype P/Q.
+  heatpump: { phase: 'a', target_current_a: 60, q_sign: 'lagging' },
   wallbox: { phase: 'b', target_current_a: 64, q_sign: 'near_unity' },
   battery: { phase: 'c', target_current_a: 40, q_sign: 'near_unity' },
 });
@@ -203,12 +204,40 @@ const ElectricalCalibrationService = {
     },
   }),
 
+  _applyCurrentBuildingTargets: profiles => {
+    // Capacity targets are model-version configuration, not measured calibration data.
+    // Existing electrical_profiles.json files may have been generated with the old
+    // 40 A Branch-A target. Keep their measured P/Q points and baseline, but migrate
+    // the building-scale target to the current code-defined capacity (A/B/C=60/64/40 A).
+    const normalized = profiles && typeof profiles === 'object'
+      ? profiles
+      : ElectricalCalibrationService._defaultProfiles();
+
+    if (!normalized.assets || typeof normalized.assets !== 'object') normalized.assets = {};
+
+    for (const [name, target] of Object.entries(TARGETS)) {
+      const existing = normalized.assets[name] && typeof normalized.assets[name] === 'object'
+        ? normalized.assets[name]
+        : {};
+      normalized.assets[name] = {
+        ...target,
+        ...existing,
+        phase: target.phase,
+        q_sign: target.q_sign,
+        target_current_a: target.target_current_a,
+        points: existing.points && typeof existing.points === 'object' ? existing.points : {},
+      };
+    }
+
+    return normalized;
+  },
+
   _load: () => {
     const file = ElectricalCalibrationService._configPath();
     try {
       if (!fs.existsSync(file)) return ElectricalCalibrationService._defaultProfiles();
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-      return parsed && typeof parsed === 'object' ? parsed : ElectricalCalibrationService._defaultProfiles();
+      return ElectricalCalibrationService._applyCurrentBuildingTargets(parsed);
     } catch (err) {
       console.error('Electrical profile load failed:', err);
       return ElectricalCalibrationService._defaultProfiles();

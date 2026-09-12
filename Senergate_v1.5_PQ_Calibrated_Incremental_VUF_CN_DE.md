@@ -1,4 +1,7 @@
 # Senergate REAL HARDWARE v1.5 — P/Q Calibration + Incremental VUF
+
+> **v1.5.2 Hinweis / v1.5.2 提示:** Für den aktuellen `branchAB-vuf23`-Build wurde die MODELED Branch-A-Gebäudeäquivalenz von 40 A auf 60 A geändert. Die historischen 40/64/40-A-Angaben unten beschreiben den ursprünglichen v1.5-Stand. Maßgeblich für v1.5.2 ist `BRANCH_AB_SINGLE_MAX_VUF23_PATCH_CN_DE.md`. / 当前 `branchAB-vuf23` 版本已把 MODELED Branch-A 楼宇等效最大值从 40 A 调整为 60 A。下文 40/64/40 A 属于原 v1.5 历史基线；v1.5.2 以 `BRANCH_AB_SINGLE_MAX_VUF23_PATCH_CN_DE.md` 为准。
+
 # Senergate REAL HARDWARE v1.5——P/Q 校准 + 增量式 VUF 模型
 
 **Frontend build:** `v1.5-pq-calibrated-incremental-vuf`  

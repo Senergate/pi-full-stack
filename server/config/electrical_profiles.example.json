@@ -10,7 +10,7 @@
   "assets": {
     "heatpump": {
       "phase": "a",
-      "target_current_a": 40,
+      "target_current_a": 60,
       "q_sign": "lagging",
       "points": {}
     },

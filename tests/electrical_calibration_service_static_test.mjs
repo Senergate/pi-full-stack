@@ -11,5 +11,7 @@ for (const token of [
   '_waitHeatpumpStable',
   'pico_fundamental_plus_shelly_p',
   "electrical_profiles.json",
+  "target_current_a: 60",
+  "_applyCurrentBuildingTargets",
 ]) if (!svc.includes(token)) throw new Error(`Calibration service missing: ${token}`);
 console.log('electrical_calibration_service_static_test: PASS');

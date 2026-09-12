@@ -14,7 +14,10 @@
 
 export const BUILDING_TARGETS = Object.freeze({
   nominalVoltageV: 230,
-  heatpumpMaxCurrentA: 40,
+  // DEMO building-equivalent capacity. The physical ATV12 remains capped at 50 Hz.
+  // 60 A is selected so Branch A at max alone exceeds 2.3% modeled VUF
+  // with the current symmetric Weak-Grid Demo feeder while staying above 207 V.
+  heatpumpMaxCurrentA: 60,
   wallboxMaxCurrentA: 64,
   batteryMaxCurrentA: 40,
 });

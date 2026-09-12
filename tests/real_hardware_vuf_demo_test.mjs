@@ -29,14 +29,18 @@ const analyze = state => {
 };
 
 const idle = analyze({ heatpumpLevel: 0, wallboxMask: 0, batteryCharging: false });
-const severe = analyze({ heatpumpLevel: 0, wallboxMask: 3, batteryCharging: false });
+const branchAMaxOnly = analyze({ heatpumpLevel: 5, wallboxMask: 0, batteryCharging: false });
+const branchBMaxOnly = analyze({ heatpumpLevel: 0, wallboxMask: 3, batteryCharging: false });
 const compensated = analyze({ heatpumpLevel: 5, wallboxMask: 3, batteryCharging: true });
 
 assert(Math.abs(idle.vufPercent) < 1e-9, `Ideal OFF baseline should be ~0% VUF, got ${idle.vufPercent}`);
-assert(severe.vufPercent > 2.5, `Weak-Grid Demo should reach >2.5% modeled VUF for a severe 64 A single-phase scenario, got ${severe.vufPercent}`);
-assert(severe.voltageSafe === true, `Demo >2.5% point must remain inside 207–253 V guard, got ${JSON.stringify(severe.loadVoltageMagnitudes)}`);
-assert(compensated.vufPercent < severe.vufPercent, 'Adding L1/L3 flexible capacity should reduce the severe L2-only VUF scenario.');
+assert(branchAMaxOnly.vufPercent > 2.3, `Branch A max alone must exceed 2.3% modeled VUF, got ${branchAMaxOnly.vufPercent}`);
+assert(branchBMaxOnly.vufPercent > 2.3, `Branch B max alone must exceed 2.3% modeled VUF, got ${branchBMaxOnly.vufPercent}`);
+assert(branchAMaxOnly.voltageSafe === true, `Branch A max must remain inside 207–253 V guard, got ${JSON.stringify(branchAMaxOnly.loadVoltageMagnitudes)}`);
+assert(branchBMaxOnly.voltageSafe === true, `Branch B max must remain inside 207–253 V guard, got ${JSON.stringify(branchBMaxOnly.loadVoltageMagnitudes)}`);
+assert(compensated.vufPercent < branchBMaxOnly.vufPercent, 'Adding L1/L3 flexible capacity should reduce the severe L2-only VUF scenario.');
 
 console.log('real_hardware_vuf_demo_test: PASS');
-console.log(`severe WB-only VUF=${severe.vufPercent.toFixed(3)}%, voltages=${JSON.stringify(severe.loadVoltageMagnitudes)}`);
+console.log(`Branch-A-only max VUF=${branchAMaxOnly.vufPercent.toFixed(3)}%, voltages=${JSON.stringify(branchAMaxOnly.loadVoltageMagnitudes)}`);
+console.log(`Branch-B-only max VUF=${branchBMaxOnly.vufPercent.toFixed(3)}%, voltages=${JSON.stringify(branchBMaxOnly.loadVoltageMagnitudes)}`);
 console.log(`all-max VUF=${compensated.vufPercent.toFixed(3)}%`);

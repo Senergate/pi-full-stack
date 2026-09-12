@@ -6,7 +6,7 @@ const dashboard = fs.readFileSync(new URL('../client/src/components/SimpleDashbo
 if (/projectionGain/.test(model) || /CURRENT_PROJECTION_FACTOR/.test(dashboard)) {
   throw new Error('Legacy measured-current projection gains must be removed.');
 }
-if (!model.includes('heatpumpAggregateMaxCurrentA: 40')) throw new Error('Equivalent heat-pump aggregate current missing.');
+if (!model.includes('heatpumpAggregateMaxCurrentA: 60')) throw new Error('60 A Branch-A building-equivalent current missing.');
 if (!model.includes('branchAEquivalentHeatpumps: 2')) throw new Error('Branch-A 2-module mapping missing.');
 if (!model.includes('batteryChargeCurrentA: 40')) throw new Error('40 A battery equivalent missing.');
 if (!model.includes('branchBEquivalentWallboxesPerRelay: 2')) throw new Error('Branch-B equivalent-device mapping missing.');

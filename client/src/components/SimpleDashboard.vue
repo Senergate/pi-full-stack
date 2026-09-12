@@ -62,19 +62,19 @@ const GRID_IMPEDANCE_PRESETS = {
     provenance: 'generic_reference_only',
   },
   demo: {
-    label: 'Weak-Grid Demo · VUF >2.5% severe-imbalance target',
-    // Explicit DEMO feeder: selected so a severe 64 A single-phase building
-    // load can naturally produce >2.5% modeled VUF while remaining above the
-    // 207 V undervoltage guard in the nominal 230 V test case.
+    label: 'Weak-Grid Demo · Branch A/B single-branch VUF >2.3% target',
+    // Explicit DEMO feeder: kept symmetric. With the building-equivalent
+    // capacities A=60 A and B=64 A, either Branch A max alone or Branch B max
+    // alone exceeds 2.3% modeled VUF while remaining above the 207 V guard.
     rPhase: 0.26,
     xPhase: 0.091,
     rNeutral: 0.03,
     xNeutral: 0.01,
-    provenance: 'weak_grid_demo_target_vuf_gt_2_5_not_site_calibrated',
+    provenance: 'weak_grid_demo_branchAB_single_max_vuf_gt_2_3_not_site_calibrated',
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.1-branchA-race-recheck-fix';
+const FRONTEND_BUILD_VERSION = 'v1.5.2-branchAB-vuf23';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -1210,7 +1210,7 @@ onUnmounted(() => {
         <span>|Z<sub>N</sub>| = {{ formatNullableNumber(neutralImpedanceMagnitude, 3, ' Ω') }}</span>
         <span>|V<sub>N</sub>| = {{ neutralVoltageDropMagnitude !== null ? `${neutralVoltageDropMagnitude.toFixed(2)} V` : '--' }}</span>
         <span>Incremental model: V<sub>PCC,proj</sub> = V<sub>PCC,OFF</sub> − Z<sub>phase</sub>ΔI − Z<sub>N</sub>ΔI<sub>N</sub></span>
-        <span>Branch A: 1 motor → 2 HP modules · max 40 A</span>
+        <span>Branch A: 1 motor → building equivalent · max 60 A</span>
         <span>Branch B: 1 relay → 2 WB · 2 relays → 4 WB · max 64 A</span>
         <span>Battery: building equivalent · max 40 A</span>
       </div>

@@ -11,8 +11,8 @@ function assert(condition, message) {
 
 const level3 = heatpumpCommandToTwinLevel({ mode: 'start', level: 3, target_hz: 30 });
 assert(level3 === 3, `start,30 must project twin level 3 immediately, got ${level3}`);
-assert(projectBuildingCurrents({ heatpumpLevel: level3, wallboxMask: 0, batteryCharging: false }).a === 24,
-  'Level 3 must immediately model 24 A on L1.');
+assert(projectBuildingCurrents({ heatpumpLevel: level3, wallboxMask: 0, batteryCharging: false }).a === 36,
+  'Level 3 must immediately model 36 A on L1 in the 60 A building-equivalent model.');
 
 const level5 = heatpumpCommandToTwinLevel({ mode: 'start', target_hz: 50 });
 assert(level5 === 5, `start,50 must infer twin level 5, got ${level5}`);
