@@ -12,7 +12,7 @@ const SAMPLE_WINDOW_MS = 10000;
 const MIN_SHELLY_SAMPLES = 4;
 
 const TARGETS = Object.freeze({
-  heatpump: { phase: 'a', target_current_a: 60, q_sign: 'lagging' },
+  heatpump: { phase: 'a', target_current_a: 40, q_sign: 'lagging' },
   wallbox: { phase: 'b', target_current_a: 64, q_sign: 'near_unity' },
   battery: { phase: 'c', target_current_a: 40, q_sign: 'near_unity' },
 });
@@ -203,39 +203,12 @@ const ElectricalCalibrationService = {
     },
   }),
 
-  _normalizeProfiles: profiles => {
-    const defaults = ElectricalCalibrationService._defaultProfiles();
-    const source = profiles && typeof profiles === 'object' ? profiles : {};
-    const sourceAssets = source.assets && typeof source.assets === 'object' ? source.assets : {};
-
-    const mergeAsset = name => ({
-      ...defaults.assets[name],
-      ...(sourceAssets[name] ?? {}),
-      // Building-scale target is a model configuration, not a prototype
-      // measurement. Keep the current target even when an older v1.5.1
-      // electrical_profiles.json still contains heatpump=40 A.
-      target_current_a: TARGETS[name].target_current_a,
-      points: { ...(sourceAssets[name]?.points ?? {}) },
-    });
-
-    return {
-      ...defaults,
-      ...source,
-      baseline: { ...defaults.baseline, ...(source.baseline ?? {}) },
-      assets: {
-        heatpump: mergeAsset('heatpump'),
-        wallbox: mergeAsset('wallbox'),
-        battery: mergeAsset('battery'),
-      },
-    };
-  },
-
   _load: () => {
     const file = ElectricalCalibrationService._configPath();
     try {
       if (!fs.existsSync(file)) return ElectricalCalibrationService._defaultProfiles();
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-      return ElectricalCalibrationService._normalizeProfiles(parsed);
+      return parsed && typeof parsed === 'object' ? parsed : ElectricalCalibrationService._defaultProfiles();
     } catch (err) {
       console.error('Electrical profile load failed:', err);
       return ElectricalCalibrationService._defaultProfiles();

@@ -14,7 +14,7 @@
 
 export const BUILDING_TARGETS = Object.freeze({
   nominalVoltageV: 230,
-  heatpumpMaxCurrentA: 60,
+  heatpumpMaxCurrentA: 40,
   wallboxMaxCurrentA: 64,
   batteryMaxCurrentA: 40,
 });
@@ -78,25 +78,8 @@ const finiteOrNull = value => {
   return Number.isFinite(n) ? n : null;
 };
 
-const getAsset = (profiles, name) => {
-  const fallback = DEFAULT_ELECTRICAL_PROFILES.assets[name];
-  const configured = profiles?.assets?.[name];
-
-  if (!configured || typeof configured !== 'object') return fallback;
-
-  // A backend profile may intentionally contain an empty points:{} object
-  // before real P/Q calibration. Merge the fallback points instead of letting
-  // the empty object erase the Building-Twin model. Real calibrated points,
-  // when present, override the corresponding fallback points by key.
-  return {
-    ...fallback,
-    ...configured,
-    points: {
-      ...(fallback?.points ?? {}),
-      ...(configured?.points ?? {}),
-    },
-  };
-};
+const getAsset = (profiles, name) =>
+  profiles?.assets?.[name] ?? DEFAULT_ELECTRICAL_PROFILES.assets[name];
 
 const pointFor = (asset, state) => {
   const key = String(state);

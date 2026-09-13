@@ -22,7 +22,7 @@ export const BUILDING_TWIN_CONFIG = Object.freeze({
   branchAEquivalentHeatpumps: 2,
   heatpumpLevels: 5,
   // Aggregate building-scale contribution of the 2 equivalent heat-pump modules.
-  heatpumpAggregateMaxCurrentA: 60,
+  heatpumpAggregateMaxCurrentA: 40,
 
   branchBEquivalentWallboxesPerRelay: 2,
   // Single-phase modeled current per equivalent wallbox.
@@ -31,7 +31,7 @@ export const BUILDING_TWIN_CONFIG = Object.freeze({
   // Independent modeled contribution for the current battery prototype state.
   batteryChargeCurrentA: 40,
 
-  provenance: 'demo_equivalent_device_model_v3_60_64_40',
+  provenance: 'demo_equivalent_device_model_v3_40_64_40',
 });
 
 const clampInt = (value, min, max) => {
