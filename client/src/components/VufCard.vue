@@ -1,6 +1,6 @@
 <template>
   <section class="vuf-card">
-    <div class="eyebrow">Simulated three-phase voltage unbalance</div>
+    <div class="eyebrow">Estimated three-phase voltage unbalance</div>
 
     <div class="big-status">
       <div class="value">{{ formattedVuf }}</div>
@@ -20,10 +20,16 @@
 
     <div class="reference">Engineering reference: EN 50160 VUF ≤ 2% · demo status only</div>
 
+    <div class="vuf-breakdown">
+      <span>Total estimated: {{ formatPercent(safeVuf) }}</span>
+      <span>Baseline PCC: {{ formattedBaseline }}</span>
+      <span>Scenario ΔVUF: {{ formattedLoadImpact }}</span>
+    </div>
+
     <div class="history">
       <div class="history-header">
         <span>VUF · last 10 seconds</span>
-        <span class="history-range">0–2.5%</span>
+        <span class="history-range">0–4.0%</span>
       </div>
 
       <div ref="graphContainer" class="graph-container">
@@ -35,11 +41,23 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { classifyVuf, formatVufPercent, numberOrNullVuf } from '../VufPresentation.js';
 
 const props = defineProps({
   vuf: {
     type: Number,
-    required: true,
+    required: false,
+    default: null,
+  },
+  baselineVuf: {
+    type: Number,
+    required: false,
+    default: null,
+  },
+  loadImpactVuf: {
+    type: Number,
+    required: false,
+    default: null,
   },
 });
 
@@ -50,7 +68,7 @@ const GRAPH_HEIGHT = 150;
 const SECONDS_VISIBLE = 10;
 
 const MIN_VUF = 0;
-const MAX_VUF = 2.5;
+const MAX_VUF = 4.0;
 
 const MAX_POINTS = 300;
 
@@ -62,50 +80,33 @@ const graphState = reactive({
   resizeObserver: null,
 });
 
-const safeVuf = computed(() => {
-  const value = Number(props.vuf);
+const safeVuf = computed(() => numberOrNullVuf(props.vuf));
 
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
-});
+const formatPercent = value => formatVufPercent(value);
+const formattedVuf = computed(() => formatVufPercent(safeVuf.value));
+const formattedBaseline = computed(() => formatVufPercent(props.baselineVuf));
+const formattedLoadImpact = computed(() => formatVufPercent(props.loadImpactVuf));
 
-const formattedVuf = computed(() => {
-  return `${safeVuf.value.toFixed(1)}%`;
-});
-
-const statusLabel = computed(() => {
-  if (safeVuf.value > 2) {
-    return 'HIGH';
-  }
-
-  if (safeVuf.value > 1) {
-    return 'BALANCING';
-  }
-
-  return 'BALANCED';
-});
-
+const status = computed(() => classifyVuf(safeVuf.value));
+const statusLabel = computed(() => status.value.label.toUpperCase());
 const statusClass = computed(() => {
-  if (safeVuf.value > 2) {
-    return 'bad';
-  }
-
-  if (safeVuf.value > 1) {
-    return 'warn';
-  }
-
-  return 'good';
+  if (status.value.className === 'critical') return 'bad';
+  if (status.value.className === 'warning') return 'warn';
+  if (status.value.className === 'balanced') return 'good';
+  return 'unknown';
 });
 
-const gaugeWidth = computed(() => {
-  return `${Math.min(100, (safeVuf.value / 4) * 100)}%`;
-});
+const gaugeWidth = computed(() =>
+  safeVuf.value === null ? '0%' : `${Math.min(100, (safeVuf.value / 4) * 100)}%`
+);
 
 const addPoint = value => {
-  const numericValue = Number(value);
-
-  if (!Number.isFinite(numericValue)) {
+  if (value === null || value === undefined || value === '') {
     return;
   }
+
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return;
 
   graphState.data.push({
     ts: performance.now(),
@@ -139,7 +140,7 @@ const resizeCanvas = () => {
 };
 
 const drawGrid = (ctx, mapX, mapY, padding, width, height, now) => {
-  const yValues = [0, 0.5, 1, 1.5, 2, 2.5];
+  const yValues = [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4];
 
   ctx.font = '11px sans-serif';
   ctx.textAlign = 'right';
@@ -447,6 +448,10 @@ onUnmounted(() => {
   color: var(--yellow);
 }
 
+.unknown {
+  color: #789aac;
+}
+
 .bad {
   color: var(--red);
 }
@@ -527,4 +532,20 @@ onUnmounted(() => {
   width: 100%;
   height: 150px;
 }
+.vuf-breakdown {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+  color: #83a7bd;
+  font-size: 10px;
+}
+
+.vuf-breakdown span {
+  padding: 6px 8px;
+  border: 1px solid rgba(88, 231, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(3, 15, 24, 0.4);
+}
+
 </style>

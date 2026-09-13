@@ -1,3 +1,9 @@
+const finiteOrNull = value => {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
 const PhasorCalculator = {
   // Return the magnitude of a complex number.
   complexMagnitude: value => Math.hypot(value.re, value.im),
@@ -31,21 +37,22 @@ const PhasorCalculator = {
   //
   // For an inductive load:
   // I_angle = V_angle - acos(PF)
-  buildCurrentPhasorsFromPF: (currents, powerFactors = { a: 1, b: 1, c: 1 }) => {
-    const baseAngles = {
-      a: 0,
-      b: -120,
-      c: 120,
-    };
-
+  buildCurrentPhasorsFromPF: (
+    currents,
+    powerFactors = { a: 1, b: 1, c: 1 },
+    sourceAngles = { a: 0, b: -120, c: 120 }
+  ) => {
     const result = {};
 
     for (const phase of ['a', 'b', 'c']) {
-      const current = Number(currents?.[phase] ?? 0);
-      const pf = Number(powerFactors?.[phase] ?? 1);
+      const current = finiteOrNull(currents?.[phase]);
+      const pf = finiteOrNull(powerFactors?.[phase]);
+      const sourceAngle = finiteOrNull(sourceAngles?.[phase]);
+
+      if (current === null || pf === null || sourceAngle === null || current < 0) return null;
 
       const phi = PhasorCalculator.powerFactorToAngle(pf);
-      const angle = baseAngles[phase] - phi;
+      const angle = sourceAngle - phi;
 
       result[phase] = PhasorCalculator.polarToComplex(current, angle);
     }
@@ -89,16 +96,174 @@ const PhasorCalculator = {
     c: PhasorCalculator.complexMultiply(impedances.c, currentPhasors.c),
   }),
 
+  // Build neutral impedance ZN = RN + jXN.
+  buildNeutralImpedance: (resistance = 0, reactance = 0) => ({
+    re: Number(resistance ?? 0),
+    im: Number(reactance ?? 0),
+  }),
+
+  // Fundamental neutral-current phasor: IN = IA + IB + IC.
+  computeNeutralCurrentPhasor: currentPhasors =>
+    PhasorCalculator.complexAdd(
+      PhasorCalculator.complexAdd(currentPhasors.a, currentPhasors.b),
+      currentPhasors.c
+    ),
+
+  // Neutral-point displacement VN = ZN * IN.
+  computeNeutralVoltageDrop: (neutralCurrentPhasor, neutralImpedance) =>
+    PhasorCalculator.complexMultiply(neutralImpedance, neutralCurrentPhasor),
+
   // Calculate simulated load-node voltages:
   //
-  // V_load = V_source - Z * I
-  computeLoadVoltages: (sourceVoltages, voltageDrops) => ({
-    a: PhasorCalculator.complexSubtract(sourceVoltages.a, voltageDrops.a),
+  // VAN = EA - ZA*IA - VN
+  // VBN = EB - ZB*IB - VN
+  // VCN = EC - ZC*IC - VN
+  //
+  // With ZN = 0 this is backward-compatible with the previous phase-only model.
+  computeLoadVoltages: (sourceVoltages, voltageDrops, neutralVoltageDrop = { re: 0, im: 0 }) => ({
+    a: PhasorCalculator.complexSubtract(
+      PhasorCalculator.complexSubtract(sourceVoltages.a, voltageDrops.a),
+      neutralVoltageDrop
+    ),
 
-    b: PhasorCalculator.complexSubtract(sourceVoltages.b, voltageDrops.b),
+    b: PhasorCalculator.complexSubtract(
+      PhasorCalculator.complexSubtract(sourceVoltages.b, voltageDrops.b),
+      neutralVoltageDrop
+    ),
 
-    c: PhasorCalculator.complexSubtract(sourceVoltages.c, voltageDrops.c),
+    c: PhasorCalculator.complexSubtract(
+      PhasorCalculator.complexSubtract(sourceVoltages.c, voltageDrops.c),
+      neutralVoltageDrop
+    ),
   }),
+
+  // Complex conjugate.
+  complexConjugate: value => ({ re: value.re, im: -value.im }),
+
+  // Divide complex numbers a / b.
+  complexDivide: (a, b) => {
+    const denominator = b.re * b.re + b.im * b.im;
+    if (!Number.isFinite(denominator) || denominator <= Number.EPSILON) return null;
+    return {
+      re: (a.re * b.re + a.im * b.im) / denominator,
+      im: (a.im * b.re - a.re * b.im) / denominator,
+    };
+  },
+
+  complexAngleDegrees: value => (Math.atan2(value.im, value.re) * 180) / Math.PI,
+
+  // Build fundamental current phasors from complex power using S = V * conj(I).
+  // Therefore I = conj(S / V). P is in W, Q in var, V in volts -> I in A.
+  buildCurrentPhasorsFromComplexPower: (powers, voltagePhasors) => {
+    const result = {};
+    for (const phase of ['a', 'b', 'c']) {
+      const p = finiteOrNull(powers?.[phase]?.p);
+      const q = finiteOrNull(powers?.[phase]?.q);
+      const voltage = voltagePhasors?.[phase];
+      if (p === null || q === null || !voltage) return null;
+      const quotient = PhasorCalculator.complexDivide({ re: p, im: q }, voltage);
+      if (!quotient) return null;
+      result[phase] = PhasorCalculator.complexConjugate(quotient);
+    }
+    return result;
+  },
+
+  // Incremental PCC model used by v1.5. The measured/captured OFF-state PCC
+  // voltage is the baseline. Only the additional controllable building load is
+  // propagated through the modeled feeder impedance. This avoids subtracting
+  // the upstream voltage drop twice from an already measured PCC voltage.
+  analyzeVUFIncrementalPQ: ({
+    powers,
+    baselineVoltages = { a: 230, b: 230, c: 230 },
+    baselineAngles = { a: 0, b: -120, c: 120 },
+    resistance = { a: 0.03, b: 0.03, c: 0.03 },
+    reactance = { a: 0, b: 0, c: 0 },
+    neutralResistance = 0,
+    neutralReactance = 0,
+    voltageLimits = { min: 207, max: 253 },
+  }) => {
+    const requiredValues = [
+      ...['a', 'b', 'c'].flatMap(phase => [
+        finiteOrNull(powers?.[phase]?.p),
+        finiteOrNull(powers?.[phase]?.q),
+        finiteOrNull(baselineVoltages?.[phase]),
+        finiteOrNull(baselineAngles?.[phase]),
+        finiteOrNull(resistance?.[phase]),
+        finiteOrNull(reactance?.[phase]),
+      ]),
+      finiteOrNull(neutralResistance),
+      finiteOrNull(neutralReactance),
+    ];
+
+    if (requiredValues.some(value => value === null)) {
+      return {
+        vufPercent: null,
+        baselineVufPercent: null,
+        error: 'Missing or invalid incremental P/Q VUF input.',
+      };
+    }
+
+    const baselineVoltagePhasors = PhasorCalculator.buildSourceVoltagePhasors(baselineVoltages, baselineAngles);
+    const currentPhasors = PhasorCalculator.buildCurrentPhasorsFromComplexPower(powers, baselineVoltagePhasors);
+    if (!currentPhasors) {
+      return { vufPercent: null, baselineVufPercent: null, error: 'Unable to build current phasors from P/Q.' };
+    }
+
+    const impedances = PhasorCalculator.buildLineImpedances(resistance, reactance);
+    const voltageDrops = PhasorCalculator.computeVoltageDrops(currentPhasors, impedances);
+    const neutralImpedance = PhasorCalculator.buildNeutralImpedance(neutralResistance, neutralReactance);
+    const neutralCurrentPhasor = PhasorCalculator.computeNeutralCurrentPhasor(currentPhasors);
+    const neutralVoltageDrop = PhasorCalculator.computeNeutralVoltageDrop(neutralCurrentPhasor, neutralImpedance);
+    const loadVoltagePhasors = PhasorCalculator.computeLoadVoltages(
+      baselineVoltagePhasors,
+      voltageDrops,
+      neutralVoltageDrop
+    );
+
+    const baselineSequenceComponents = PhasorCalculator.computeSequenceComponents(baselineVoltagePhasors);
+    const baselineVuf = PhasorCalculator.computeVUF(baselineSequenceComponents);
+    const sequenceComponents = PhasorCalculator.computeSequenceComponents(loadVoltagePhasors);
+    const vuf = PhasorCalculator.computeVUF(sequenceComponents);
+
+    const loadVoltageMagnitudes = Object.fromEntries(
+      ['a', 'b', 'c'].map(phase => [phase, PhasorCalculator.complexMagnitude(loadVoltagePhasors[phase])])
+    );
+    const loadVoltageAngles = Object.fromEntries(
+      ['a', 'b', 'c'].map(phase => [phase, PhasorCalculator.complexAngleDegrees(loadVoltagePhasors[phase])])
+    );
+    const currentMagnitudes = Object.fromEntries(
+      ['a', 'b', 'c'].map(phase => [phase, PhasorCalculator.complexMagnitude(currentPhasors[phase])])
+    );
+
+    const minVoltage = finiteOrNull(voltageLimits?.min) ?? 207;
+    const maxVoltage = finiteOrNull(voltageLimits?.max) ?? 253;
+    const voltageSafe = Object.values(loadVoltageMagnitudes).every(v => v >= minVoltage && v <= maxVoltage);
+
+    return {
+      ...vuf,
+      baselineVufPercent: baselineVuf.vufPercent,
+      scenarioDeltaVufPercent:
+        vuf.vufPercent === null || baselineVuf.vufPercent === null
+          ? null
+          : vuf.vufPercent - baselineVuf.vufPercent,
+      baselineVoltagePhasors,
+      currentPhasors,
+      currentMagnitudes,
+      impedances,
+      neutralImpedance,
+      neutralCurrentPhasor,
+      neutralVoltageDrop,
+      voltageDrops,
+      loadVoltagePhasors,
+      loadVoltageMagnitudes,
+      loadVoltageAngles,
+      sequenceComponents,
+      baselineSequenceComponents,
+      voltageSafe,
+      voltageLimits: { min: minVoltage, max: maxVoltage },
+      error: vuf.error,
+    };
+  },
 
   // Compute VUF from positive- and negative-sequence voltage.
   computeVUF: sequenceComponents => {
@@ -152,8 +317,40 @@ const PhasorCalculator = {
       b: 0,
       c: 0,
     },
+
+    neutralResistance = 0,
+    neutralReactance = 0,
   }) => {
-    const currentPhasors = PhasorCalculator.buildCurrentPhasorsFromPF(currents, powerFactors);
+    const requiredValues = [
+      ...['a', 'b', 'c'].map(p => finiteOrNull(currents?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(powerFactors?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(sourceVoltages?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(sourceAngles?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(resistance?.[p])),
+      ...['a', 'b', 'c'].map(p => finiteOrNull(reactance?.[p])),
+      finiteOrNull(neutralResistance),
+      finiteOrNull(neutralReactance),
+    ];
+
+    if (requiredValues.some(value => value === null)) {
+      return {
+        vufPercent: null,
+        positiveSequenceMagnitude: null,
+        negativeSequenceMagnitude: null,
+        error: 'Missing or invalid VUF input. No fail-open substitution is allowed.',
+      };
+    }
+
+    const currentPhasors = PhasorCalculator.buildCurrentPhasorsFromPF(currents, powerFactors, sourceAngles);
+
+    if (!currentPhasors) {
+      return {
+        vufPercent: null,
+        positiveSequenceMagnitude: null,
+        negativeSequenceMagnitude: null,
+        error: 'Invalid current phasor input.',
+      };
+    }
 
     const sourceVoltagePhasors = PhasorCalculator.buildSourceVoltagePhasors(sourceVoltages, sourceAngles);
 
@@ -161,7 +358,17 @@ const PhasorCalculator = {
 
     const voltageDrops = PhasorCalculator.computeVoltageDrops(currentPhasors, impedances);
 
-    const loadVoltagePhasors = PhasorCalculator.computeLoadVoltages(sourceVoltagePhasors, voltageDrops);
+    const neutralImpedance = PhasorCalculator.buildNeutralImpedance(neutralResistance, neutralReactance);
+
+    const neutralCurrentPhasor = PhasorCalculator.computeNeutralCurrentPhasor(currentPhasors);
+
+    const neutralVoltageDrop = PhasorCalculator.computeNeutralVoltageDrop(neutralCurrentPhasor, neutralImpedance);
+
+    const loadVoltagePhasors = PhasorCalculator.computeLoadVoltages(
+      sourceVoltagePhasors,
+      voltageDrops,
+      neutralVoltageDrop
+    );
 
     // Reuse the existing generic symmetrical-component function.
     const sequenceComponents = PhasorCalculator.computeSequenceComponents(loadVoltagePhasors);
@@ -174,6 +381,9 @@ const PhasorCalculator = {
       currentPhasors,
       sourceVoltagePhasors,
       impedances,
+      neutralImpedance,
+      neutralCurrentPhasor,
+      neutralVoltageDrop,
       voltageDrops,
       loadVoltagePhasors,
       sequenceComponents,
@@ -217,20 +427,20 @@ const PhasorCalculator = {
   // Validate measured RMS currents and manually assigned phase angles.
   validateInputs: (measuredCurrents, phaseAngles) => {
     const currents = {
-      a: Number(measuredCurrents?.a),
-      b: Number(measuredCurrents?.b),
-      c: Number(measuredCurrents?.c),
+      a: finiteOrNull(measuredCurrents?.a),
+      b: finiteOrNull(measuredCurrents?.b),
+      c: finiteOrNull(measuredCurrents?.c),
     };
 
     const angles = {
-      a: Number(phaseAngles?.a),
-      b: Number(phaseAngles?.b),
-      c: Number(phaseAngles?.c),
+      a: finiteOrNull(phaseAngles?.a),
+      b: finiteOrNull(phaseAngles?.b),
+      c: finiteOrNull(phaseAngles?.c),
     };
 
     const values = [currents.a, currents.b, currents.c, angles.a, angles.b, angles.c];
 
-    if (values.some(value => !Number.isFinite(value))) {
+    if (values.some(value => value === null)) {
       return {
         valid: false,
         currents,

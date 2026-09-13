@@ -22,3 +22,9 @@ package-lock.json
 *.njsproj
 *.sln
 *.sw?
+
+# Generated archives / erzeugte Archive
+*.zip
+node_modules/
+dist/
+build/

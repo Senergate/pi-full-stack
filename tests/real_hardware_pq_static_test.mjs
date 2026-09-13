@@ -1,0 +1,13 @@
+import fs from 'node:fs';
+const dash=fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue',import.meta.url),'utf8');
+const card=fs.readFileSync(new URL('../client/src/components/CurrentCard.vue',import.meta.url),'utf8');
+const agent=fs.readFileSync(new URL('../client/src/components/AgentCard.vue',import.meta.url),'utf8');
+if(!dash.includes("v1.5-pq-calibrated-vuf-demo")) throw new Error('v1.5 build marker missing');
+if(dash.includes('@click="setRuntimeMode(\'simulation\')"')) throw new Error('Simulation UI must be removed');
+if(!dash.includes(':vuf="currentVuf"')) throw new Error('Agent must use total Estimated VUF');
+if(!dash.includes('Demo Weak Grid · VUF >2.5% reachable')) throw new Error('Explicit >2.5% demo preset missing');
+if(!dash.includes('207–253 V')) throw new Error('Voltage guard label missing');
+if(!card.includes('SHELLY · MEASURED')) throw new Error('Measured current strip missing');
+if(!card.includes('BUILDING TWIN · MODELED · 0–100 A')) throw new Error('Modeled current range missing');
+if(!agent.includes('result?.voltageValid')) throw new Error('AI must reject voltage-invalid candidates');
+console.log('real_hardware_pq_static_test: PASS');

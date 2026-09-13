@@ -1,6 +1,5 @@
 import path from 'path';
 import http from 'http';
-import https from 'https';
 import express from 'express';
 import config from './config.js';
 import { Server as IOServer } from 'socket.io';
@@ -12,52 +11,74 @@ const Server = {
     Object.fromEntries(
       [...Server.services].map(([key, value]) => [
         key,
-        Object.keys(value).filter(
-          attr => typeof value[attr] === 'function' && attr !== 'init' && !attr.startsWith('_')
-        ),
+        Object.keys(value).filter(attr => typeof value[attr] === 'function' && attr !== 'init' && !attr.startsWith('_')),
       ])
     ),
 
+  emitServiceEvent: (service, event, payload) => {
+    if (!Server.io) return;
+    Server.io.emit(service, event, payload);
+  },
+
   init: async services => {
+    if (!Server.server) throw new Error('Server.start() must be called before Server.init().');
+
     Server.io = new IOServer(Server.server, {
       cors: {
-        // allow debug port
-        origin: `http://${config.pi_ip}:5173`,
+        origin: [`http://${config.pi_ip}:5173`, 'http://localhost:5173', 'http://127.0.0.1:5173'],
         methods: ['GET', 'POST'],
       },
       maxHttpBufferSize: 20 * 1024 * 1024,
     });
 
+    // Register all services first, so init() can safely access dependencies.
+    for (const service of services) {
+      service.server = Server;
+      Server.services.set(service.name, service);
+    }
+
+    for (const service of services) {
+      await service.init?.(Server);
+    }
+
     Server.io.on('connect', socket => {
       socket.on('getServices', (_, ack) => ack(Server.getServices()));
-      const services = Server.getServices();
-      for (let s in services) {
-        const service = Server.services.get(s);
-        for (let f of services[s]) {
-          socket.on(s + '.' + f, async (args, ack) => {
-            ack(await service[f](...args, socket));
+      const exposedServices = Server.getServices();
+
+      for (const serviceName in exposedServices) {
+        const service = Server.services.get(serviceName);
+        for (const funcName of exposedServices[serviceName]) {
+          socket.on(`${serviceName}.${funcName}`, async (args = [], ack = () => {}) => {
+            try {
+              const safeArgs = Array.isArray(args) ? args : [args];
+              const data = await service[funcName](...safeArgs, socket);
+              ack({ ok: true, data });
+            } catch (err) {
+              console.error(`RPC ${serviceName}.${funcName} failed:`, err);
+              ack({
+                ok: false,
+                error: {
+                  message: err instanceof Error ? err.message : String(err),
+                  service: serviceName,
+                  function: funcName,
+                },
+              });
+            }
           });
         }
       }
     });
 
-    for (let service of services) {
-      service.server = Server;
-      await service.init(Server);
-      Server.services.set(service.name, service);
-    }
-
-    console.log(Server.getServices());
+    console.log('Services ready:', Server.getServices());
   },
 
   start: async () => {
     Server.app = express();
     Server.server = http.Server(Server.app);
     Server.server.app = Server.app;
-
     Server.app.use(express.static(path.resolve(process.cwd(), '../client/dist')));
 
-    const res = await Server.server.listen(config.http_port);
+    await new Promise(resolve => Server.server.listen(config.http_port, resolve));
     console.log('listening *:' + config.http_port);
   },
 };

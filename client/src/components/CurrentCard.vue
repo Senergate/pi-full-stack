@@ -1,22 +1,59 @@
 <template>
   <section class="current-card">
-    <div class="card-header" style='padding-bottom:4em;'>
-        <div class="eyebrow">Measured phase currents</div>
-      <span class="badge"> {{ yRange.min }}–{{ yRange.max }} A </span>
+    <div class="card-header">
+      <div>
+        <div class="eyebrow">SHELLY · MEASURED + BUILDING TWIN · MODELED</div>
+        <h2>Phase Currents</h2>
+      </div>
+
+      <span class="badge">
+        {{ yRange.min }}–{{ yRange.max }} A
+      </span>
+    </div>
+
+    <div class="measured-strip">
+      <div class="measured-copy">
+        <strong>SHELLY · MEASURED</strong>
+        <small>physical prototype current / 原型实测电流</small>
+      </div>
+      <div
+        v-for="phase in measuredPhases"
+        :key="`measured-${phase.key}`"
+        class="measured-phase"
+      >
+        <span>{{ phase.label }}</span>
+        <strong>{{ formatMeasuredCurrent(phase.current) }} A</strong>
+      </div>
+    </div>
+
+    <div class="model-heading">
+      <span>{{ sourceLabel }}</span>
+      <strong>BUILDING TWIN · MODELED · 0–100 A</strong>
     </div>
 
     <div class="chart">
       <div class="plot-area">
         <!-- Horizontal grid -->
-        <div v-for="tick in ticks" :key="tick.value" class="grid-line" :style="{ bottom: `${tick.position}%` }">
-          <span class="tick-label"> {{ formatTick(tick.value) }} A </span>
+        <div
+          v-for="tick in ticks"
+          :key="tick.value"
+          class="grid-line"
+          :style="{ bottom: `${tick.position}%` }"
+        >
+          <span class="tick-label">
+            {{ formatTick(tick.value) }} A
+          </span>
 
           <div class="line" />
         </div>
 
         <!-- Bars -->
         <div class="bars">
-          <div v-for="phase in phases" :key="phase.key" class="bar-column">
+          <div
+            v-for="phase in phases"
+            :key="phase.key"
+            class="bar-column"
+          >
             <div class="bar-area">
               <div
                 class="bar"
@@ -25,12 +62,18 @@
                   backgroundColor: phase.color,
                 }"
               >
-                <span class="bar-value"> {{ formatCurrent(phase.current) }} A </span>
+                <span class="bar-value">
+                  {{ formatCurrent(phase.current) }} A
+                </span>
               </div>
             </div>
 
             <div class="phase-label">
-              <span class="phase-dot" :style="{ backgroundColor: phase.color }" />
+              <span
+                class="phase-dot"
+                :style="{ backgroundColor: phase.color }"
+              />
+
               <span>{{ phase.label }}</span>
             </div>
           </div>
@@ -41,9 +84,14 @@
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed } from 'vue'
 
 const props = defineProps({
+  sourceLabel: {
+    type: String,
+    default: 'SCALED FROM MEASURED · Digital Twin',
+  },
+
   /*
    * Same phase-key convention as SimpleDashboard:
    *
@@ -53,6 +101,11 @@ const props = defineProps({
    *   c: 43
    * }
    */
+  measuredCurrents: {
+    type: Object,
+    default: () => ({ a: null, b: null, c: null }),
+  },
+
   currents: {
     type: Object,
     required: true,
@@ -73,7 +126,7 @@ const props = defineProps({
       max: 100,
     }),
   },
-});
+})
 
 const phaseDefinitions = [
   {
@@ -91,54 +144,94 @@ const phaseDefinitions = [
     label: 'I3',
     color: '#42e38c',
   },
-];
+]
 
 const safeMin = computed(() => {
-  const value = Number(props.yRange?.min);
+  const value = Number(props.yRange?.min)
 
-  return Number.isFinite(value) ? value : 0;
-});
+  return Number.isFinite(value)
+    ? value
+    : 0
+})
 
 const safeMax = computed(() => {
-  const value = Number(props.yRange?.max);
+  const value = Number(props.yRange?.max)
 
   if (!Number.isFinite(value)) {
-    return 100;
+    return 100
   }
 
   /*
    * Prevent a zero-width / inverted range.
    */
-  return value > safeMin.value ? value : safeMin.value + 1;
-});
+  return value > safeMin.value
+    ? value
+    : safeMin.value + 1
+})
 
-const phases = computed(() => {
-  return phaseDefinitions.map(definition => {
-    const raw = Number(props.currents?.[definition.key]);
-
-    const current = Number.isFinite(raw) ? raw : 0;
-
-    /*
-     * Clamp only the visual representation.
-     *
-     * Example with range 0–100:
-     *
-     * current = 120 A
-     * displayed value = 120 A
-     * bar height = 100%
-     */
-    const clamped = Math.max(safeMin.value, Math.min(safeMax.value, current));
-
-    const height = ((clamped - safeMin.value) / (safeMax.value - safeMin.value)) * 100;
-
+const measuredPhases = computed(() =>
+  phaseDefinitions.map(definition => {
+    const value = props.measuredCurrents?.[definition.key]
+    const numeric = value === null || value === undefined || value === '' ? null : Number(value)
     return {
       ...definition,
-      current,
-      clamped,
-      height,
-    };
-  });
-});
+      current: numeric !== null && Number.isFinite(numeric) ? numeric : null,
+    }
+  })
+)
+
+const phases = computed(() => {
+  return phaseDefinitions.map(
+    definition => {
+      const rawValue = props.currents?.[definition.key]
+      const raw =
+        rawValue === null || rawValue === undefined || rawValue === ''
+          ? null
+          : Number(rawValue)
+
+      const current =
+        raw !== null && Number.isFinite(raw)
+          ? raw
+          : null
+
+      /*
+       * Clamp only the visual representation.
+       *
+       * Example with range 0–100:
+       *
+       * current = 120 A
+       * displayed value = 120 A
+       * bar height = 100%
+       */
+      const clamped =
+        current === null
+          ? safeMin.value
+          : Math.max(
+              safeMin.value,
+              Math.min(safeMax.value, current),
+            )
+
+      const height =
+        (
+          (
+            clamped -
+            safeMin.value
+          ) /
+          (
+            safeMax.value -
+            safeMin.value
+          )
+        ) * 100
+
+      return {
+        ...definition,
+        current,
+        clamped,
+        height,
+      }
+    },
+  )
+})
 
 /*
  * Five horizontal levels:
@@ -150,41 +243,103 @@ const phases = computed(() => {
  * min
  */
 const ticks = computed(() => {
-  const count = 5;
+  const count = 5
 
-  return Array.from({ length: count }, (_, index) => {
-    const fraction = index / (count - 1);
+  return Array.from(
+    { length: count },
+    (_, index) => {
+      const fraction =
+        index / (count - 1)
 
-    return {
-      value: safeMin.value + fraction * (safeMax.value - safeMin.value),
+      return {
+        value:
+          safeMin.value +
+          fraction *
+            (
+              safeMax.value -
+              safeMin.value
+            ),
 
-      position: fraction * 100,
-    };
-  });
-});
+        position:
+          fraction * 100,
+      }
+    },
+  )
+})
+
+const formatMeasuredCurrent = value =>
+  Number.isFinite(value) ? value.toFixed(2) : '—'
 
 const formatCurrent = value => {
   if (!Number.isFinite(value)) {
-    return '—';
+    return '—'
   }
 
-  if (Math.abs(value - Math.round(value)) < 0.05) {
-    return Math.round(value);
+  if (
+    Math.abs(
+      value -
+      Math.round(value),
+    ) < 0.05
+  ) {
+    return Math.round(value)
   }
 
-  return value.toFixed(1);
-};
+  return value.toFixed(1)
+}
 
 const formatTick = value => {
-  if (Math.abs(value - Math.round(value)) < 0.05) {
-    return Math.round(value);
+  if (
+    Math.abs(
+      value -
+      Math.round(value),
+    ) < 0.05
+  ) {
+    return Math.round(value)
   }
 
-  return value.toFixed(1);
-};
+  return value.toFixed(1)
+}
 </script>
 
 <style scoped>
+.measured-strip {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.4fr) repeat(3, minmax(60px, .7fr));
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 14px;
+  padding: 10px;
+  border: 1px solid #245264;
+  border-radius: 12px;
+  background: rgba(8, 27, 37, .72);
+}
+.measured-copy { display: grid; align-content: center; gap: 2px; }
+.measured-copy strong { color: #8ff1c3; font-size: 10px; letter-spacing: .05em; }
+.measured-copy small { color: #6f91a3; font-size: 8px; }
+.measured-phase {
+  display: grid;
+  gap: 3px;
+  align-content: center;
+  justify-items: end;
+  padding: 7px 8px;
+  border: 1px solid #1d4355;
+  border-radius: 9px;
+  background: #071721;
+}
+.measured-phase span { color: #6f91a3; font-size: 8px; }
+.measured-phase strong { color: #eaf6ff; font-size: 12px; }
+.model-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  color: #6f91a3;
+  font-size: 8px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.model-heading strong { color: #83a7bd; font-size: 8px; }
+
 .current-card {
   --text: #eaf6ff;
   --muted: #83a7bd;
@@ -197,9 +352,16 @@ const formatTick = value => {
   border: 1px solid var(--line);
   border-radius: 20px;
 
-  background: linear-gradient(180deg, rgba(12, 30, 44, 0.94), rgba(6, 18, 28, 0.94));
+  background:
+    linear-gradient(
+      180deg,
+      rgba(12, 30, 44, 0.94),
+      rgba(6, 18, 28, 0.94)
+    );
 
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+  box-shadow:
+    0 20px 60px
+    rgba(0, 0, 0, 0.34);
 }
 
 .card-header {
@@ -302,7 +464,13 @@ h2 {
   width: 100%;
   height: 1px;
 
-  background: rgba(255, 255, 255, 0.08);
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.08
+    );
 }
 
 /* -----------------------------
@@ -316,10 +484,10 @@ h2 {
 
   display: grid;
 
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns:
+    repeat(3, 1fr);
 
   gap: 24px;
-  bottom:-30px;
 }
 
 .bar-column {
@@ -349,11 +517,20 @@ h2 {
 
   min-height: 2px;
 
-  border-radius: 9px 9px 3px 3px;
+  border-radius:
+    9px 9px 3px 3px;
 
-  box-shadow: 0 0 18px rgba(88, 231, 255, 0.08);
+  box-shadow:
+    0 0 18px
+    rgba(
+      88,
+      231,
+      255,
+      0.08
+    );
 
-  transition: height 0.45s ease;
+  transition:
+    height 0.45s ease;
 }
 
 .bar-value {
@@ -369,7 +546,8 @@ h2 {
 
   white-space: nowrap;
 
-  transform: translateX(-50%);
+  transform:
+    translateX(-50%);
 }
 
 /* -----------------------------
@@ -398,4 +576,5 @@ h2 {
 
   border-radius: 50%;
 }
+@media(max-width:700px){.measured-strip{grid-template-columns:1fr 1fr}.measured-copy{grid-column:1/-1}.model-heading{flex-direction:column}}
 </style>
