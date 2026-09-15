@@ -62,19 +62,19 @@ const GRID_IMPEDANCE_PRESETS = {
     provenance: 'generic_reference_only',
   },
   demo: {
-    label: 'Weak-Grid Demo · Branch A/B single-branch VUF >2.3% target',
-    // Explicit DEMO feeder: kept symmetric. With the building-equivalent
-    // capacities A=60 A and B=64 A, either Branch A max alone or Branch B max
-    // alone exceeds 2.3% modeled VUF while remaining above the 207 V guard.
+    label: 'Weak-Grid Demo · Branch A/B single-max VUF >2.3% target',
+    // Explicit DEMO feeder. Together with the building-equivalent asset
+    // capacities, Branch A max (60 A) and Branch B max (64 A) can each produce
+    // a visible >2.3% modeled VUF while remaining above the 207 V guard.
     rPhase: 0.26,
     xPhase: 0.091,
     rNeutral: 0.03,
     xNeutral: 0.01,
-    provenance: 'weak_grid_demo_branchAB_single_max_vuf_gt_2_3_not_site_calibrated',
+    provenance: 'weak_grid_demo_branch_ab_single_max_vuf_gt_2_3_not_site_calibrated',
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.3-fallback-profile-fix';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-branchAB-vuf23-runtime-fix';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -1170,8 +1170,8 @@ onUnmounted(() => {
         <div>
           <strong>Senergate Grid Impedance / Netzimpedanz / 电网阻抗</strong>
           <p>
-            MODELED building-scale feeder for the incremental P/Q Digital Twin. The Weak-Grid Demo is explicitly non-site-calibrated and targets a visible >2.5% VUF under severe single-phase imbalance without applying a direct VUF multiplier.
-            / 增量 P/Q Digital Twin 使用建筑级馈线模型。Weak-Grid Demo 明确标注为非现场标定场景；严重单相不平衡时目标是自然产生 >2.5% VUF，而不是直接给 VUF 乘倍率。
+            MODELED building-scale feeder for the incremental P/Q Digital Twin. The Weak-Grid Demo is explicitly non-site-calibrated; Branch A max and Branch B max are designed to create a visible >2.3% modeled VUF without applying a direct VUF multiplier.
+            / 增量 P/Q Digital Twin 使用建筑级馈线模型。Weak-Grid Demo 明确标注为非现场标定场景；Branch A 最大值和 Branch B 最大值都设计为自然产生 >2.3% 的模型 VUF，而不是直接给 VUF 乘倍率。
           </p>
         </div>
         <span class="grid-provenance">{{ _.grid.provenance.toUpperCase() }}</span>
