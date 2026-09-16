@@ -214,7 +214,11 @@ const drawThreshold = (ctx, mapY, padding, width) => {
 };
 
 const drawLine = (ctx, points, mapX, mapY, plotLeft, plotTop, plotWidth, plotHeight) => {
-  if (points.length < 2) {
+  // A single sample is enough because the latest VUF value is held until a
+  // new measurement arrives. drawLine() extends that last sample to 'now'.
+  // Keeping this path active prevents a stable VUF trace from disappearing
+  // after the 10-second history window has moved past the last change event.
+  if (points.length === 0) {
     return;
   }
 
