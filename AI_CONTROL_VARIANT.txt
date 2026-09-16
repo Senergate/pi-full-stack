@@ -18,3 +18,9 @@ Integrated features:
 - Strict validated manual input: decimal point '.', max 2 decimal places, invalid drafts never applied
 - User-facing UI text is English only
 - CUF/load-unbalance active control intentionally deferred
+
+
+2026-09-16 WALLBOX VUF LIVE SYNC FIX
+- Current-state Wallbox activity is measurement-driven (>0.02 A) when Shelly current is available.
+- confirmedMask remains reserved for AI/control-state confirmation.
+- VUF history points use the same EnergyMeter sample timestamp as Phase Currents.

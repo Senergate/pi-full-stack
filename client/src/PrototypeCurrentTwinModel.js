@@ -2,9 +2,10 @@
  * Senergate live current display model
  * -------------------------------------------------
  * Purpose:
- *   Keep the existing v1.5.1 P/Q -> feeder -> VUF control behaviour unchanged,
- *   while making the BUILDING TWIN current bars reflect the measured prototype
- *   current curves and follow live Shelly-current changes synchronously.
+ *   Make the BUILDING TWIN current bars reflect the measured prototype current
+ *   curves and follow live Shelly-current changes synchronously. Current-state
+ *   VUF now uses the same live Wallbox/Battery current information through the
+ *   dynamic P/Q adapters in SimpleDashboard; candidate prediction remains state based.
  *
  * User-confirmed prototype measurements (±0.01 A):
  *   Heatpump L1..L5 : 0.09, 0.16, 0.21, 0.24, 0.26 A

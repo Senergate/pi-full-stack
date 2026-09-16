@@ -20,11 +20,13 @@ import {
 import { BATTERY_CONTROL_INTERNALS, CONTROL_INPUT_SPECS, cloneControlPolicyDefaults } from '../ControlPolicyConfig.js';
 import { formatControlValue, validateControlInput, validateControlPolicyRelations, validateDecimalInput } from '../ControlInputValidation.js';
 import { applyBatteryPowerToModel, batteryPowerForCurrent } from '../BatteryDynamicPowerModel.js';
-import { projectLiveScaledBuildingCurrents } from '../PrototypeCurrentTwinModel.js';
+import { PROTOTYPE_CURRENT_REFERENCE_MAX_A, projectLiveScaledBuildingCurrents } from '../PrototypeCurrentTwinModel.js';
+import { applyWallboxPowerToModel, wallboxPhysicalActiveForMeasurement, wallboxPowerForCurrent } from '../WallboxDynamicPowerModel.js';
 import {
   BUILDING_TARGETS,
   DEFAULT_ELECTRICAL_PROFILES,
   baselineVoltagesFromProfiles,
+  modelAssetPower,
   modelBuildingPowers,
   profileSummary,
 } from '../ElectricalProfileModel.js';
@@ -79,7 +81,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-b-ramping-ref140-collapsible-en';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-b-wallbox-vuf-live-sync-fix';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -89,7 +91,7 @@ const CURRENT_ZERO_OFFSET_A = { a: 0.24, b: 0.19, c: 0.13 };
 const _ = reactive({
   count: 0,
   heatpump: { level: null, twinLevel: null, mode: null, commanded: null, effectiveTargetHz: null, effectiveTargetSource: null, targetHz: null, actualHz: null, executionState: '' },
-  wallbox: { load: null, r0: null, r1: null, r0Update: null, r1Update: null },
+  wallbox: { load: null, r0: null, r1: null, r0Update: null, r1Update: null, confirmedMask: null, targetMask: null },
   battery: { charging: null, lastUpdate: null },
   energy_meter: {
     timedelta: null,
@@ -136,6 +138,10 @@ let unwatchBranchAState = null;
 let boundRuntime = false;
 let startupTimer = null;
 let heatpumpCommandGeneration = 0;
+let wallboxCommitTimer = null;
+let wallboxTargetTimer = null;
+const WALLBOX_EXTERNAL_COMMIT_DEBOUNCE_MS = 350;
+const WALLBOX_TARGET_TIMEOUT_MS = 5000;
 
 const GRID_PANEL_STORAGE_KEY = 'senergate.gridImpedancePanelOpen';
 const gridImpedanceOpen = ref(false);
@@ -393,6 +399,10 @@ const markRealStateWaiting = () => {
   _.wallbox.r1 = null;
   _.wallbox.r0Update = null;
   _.wallbox.r1Update = null;
+  _.wallbox.confirmedMask = null;
+  _.wallbox.targetMask = null;
+  if (wallboxCommitTimer !== null) { clearTimeout(wallboxCommitTimer); wallboxCommitTimer = null; }
+  if (wallboxTargetTimer !== null) { clearTimeout(wallboxTargetTimer); wallboxTargetTimer = null; }
   _.battery.charging = null;
   _.battery.lastUpdate = null;
   _.realFeedback.branchA = { payload: null, ack: null, lastUpdate: null, ackUpdate: null };
@@ -466,11 +476,73 @@ const measuredVoltages = computed(() => ({
   c: numberOrNull(_.energy_meter.measured.c_voltage),
 }));
 
+const rawWallboxMask = computed(() => (_.wallbox.r0 === null || _.wallbox.r1 === null)
+  ? null
+  : wallboxMaskFromRelays(_.wallbox.r0, _.wallbox.r1));
+
+const commitWallboxMask = mask => {
+  const safeMask = clampInt(mask, 0, 3);
+  _.wallbox.confirmedMask = safeMask;
+  _.wallbox.load = safeMask;
+};
+
+const clearWallboxCommitTimer = () => {
+  if (wallboxCommitTimer !== null) {
+    clearTimeout(wallboxCommitTimer);
+    wallboxCommitTimer = null;
+  }
+};
+
+const clearWallboxTargetTimer = () => {
+  if (wallboxTargetTimer !== null) {
+    clearTimeout(wallboxTargetTimer);
+    wallboxTargetTimer = null;
+  }
+};
+
+const scheduleExternalWallboxCommit = () => {
+  clearWallboxCommitTimer();
+  const scheduledMask = rawWallboxMask.value;
+  if (scheduledMask === null) return;
+  wallboxCommitTimer = setTimeout(() => {
+    wallboxCommitTimer = null;
+    // External/manual relay changes are committed only after the combined
+    // two-relay mask has remained unchanged for a short debounce window.
+    // This filters transient mask 0 / mask 3 states during mask1 <-> mask2.
+    if (_.wallbox.targetMask === null && rawWallboxMask.value === scheduledMask) {
+      commitWallboxMask(scheduledMask);
+    }
+  }, WALLBOX_EXTERNAL_COMMIT_DEBOUNCE_MS);
+};
+
+const beginWallboxTarget = targetMask => {
+  const safeTarget = clampInt(targetMask, 0, 3);
+  clearWallboxCommitTimer();
+  clearWallboxTargetTimer();
+  _.wallbox.targetMask = safeTarget;
+
+  // If hardware is already at the requested combined mask, commit atomically.
+  if (rawWallboxMask.value === safeTarget) {
+    commitWallboxMask(safeTarget);
+    _.wallbox.targetMask = null;
+    return;
+  }
+
+  wallboxTargetTimer = setTimeout(() => {
+    wallboxTargetTimer = null;
+    // Do not invent success on timeout. Release the target guard and debounce
+    // the latest physically observed combined state instead.
+    _.wallbox.targetMask = null;
+    scheduleExternalWallboxCommit();
+  }, WALLBOX_TARGET_TIMEOUT_MS);
+};
+
 const currentDeviceStateForModel = computed(() => {
   const heatpumpLevel = numberOrNull(_.heatpump.twinLevel);
-  const wallboxMask = (_.wallbox.r0 === null || _.wallbox.r1 === null)
-    ? null
-    : wallboxMaskFromRelays(_.wallbox.r0, _.wallbox.r1);
+  // The model/agent consumes only an atomically confirmed combined Wallbox
+  // mask. During a two-relay transition, keep the previous confirmed mask
+  // instead of exposing transient mask 0 / mask 3 states.
+  const wallboxMask = numberOrNull(_.wallbox.confirmedMask) ?? rawWallboxMask.value;
   const batteryCharging = _.battery.charging;
   return { heatpumpLevel, wallboxMask, batteryCharging };
 });
@@ -509,18 +581,47 @@ const modelWithBatteryCurrent = (model, currentA, { fallbackToFull = true, prefe
 
 const buildingPowerModel = computed(() => {
   const state = currentDeviceStateForModel.value;
-  const model = modelBuildingPowers({
+  let model = modelBuildingPowers({
     profiles: activeProfiles.value,
     heatpumpLevel: state.heatpumpLevel,
     wallboxMask: state.wallboxMask,
     batteryCharging: state.batteryCharging,
     phaseVoltages: baselineModel.value.voltages,
   });
-  if (!model || state.batteryCharging !== true) return model;
+  if (!model) return null;
 
-  // Once Battery is physically ON, current-state VUF follows the measured
-  // charger ramp instead of jumping immediately to the full ON operating point.
-  return modelWithBatteryCurrent(model, batteryMeasuredCurrentA.value, { fallbackToFull: true, preferMeasuredPq: true });
+  // Current-state Wallbox VUF follows the same live Shelly current used by the
+  // Building-Twin current card. Candidate prediction below remains state based
+  // so hypothetical masks 1/2/3 can still be evaluated before execution.
+  if (state.wallboxMask !== null && state.wallboxMask !== undefined) {
+    const fullWallbox = modelAssetPower({
+      profiles: activeProfiles.value,
+      assetName: 'wallbox',
+      state: 3,
+      voltageV: baselineModel.value.voltages.b,
+    });
+    const liveWallboxCurrentA = measuredCurrents.value.b;
+    const wallboxPhysicalActive = wallboxPhysicalActiveForMeasurement({
+      currentA: liveWallboxCurrentA,
+      fallbackActive: Number(state.wallboxMask) > 0,
+    });
+    const dynamicWallbox = wallboxPowerForCurrent({
+      fullPower: fullWallbox,
+      fallbackPower: model.powers?.b,
+      currentA: liveWallboxCurrentA,
+      referenceMaxA: PROTOTYPE_CURRENT_REFERENCE_MAX_A.wallbox,
+      active: wallboxPhysicalActive,
+    });
+    model = applyWallboxPowerToModel(model, dynamicWallbox);
+  }
+
+  if (state.batteryCharging === true) {
+    // Once Battery is physically ON, current-state VUF follows the measured
+    // charger ramp instead of jumping immediately to the full ON operating point.
+    model = modelWithBatteryCurrent(model, batteryMeasuredCurrentA.value, { fallbackToFull: true, preferMeasuredPq: true });
+  }
+
+  return model;
 });
 
 const vufResult = computed(() => {
@@ -539,16 +640,15 @@ const vufResult = computed(() => {
   });
 });
 
-// MODELED current display for Variant B.
-// Keep the Battery-Priority AI / P/Q / VUF control logic unchanged; only the
-// displayed Building-Twin current bars follow live Shelly currents scaled with
-// the user-confirmed real prototype current curves.
+// MODELED current display for Variant B. The bars follow live Shelly currents
+// scaled with the user-confirmed prototype curves. Current-state Wallbox VUF
+// now consumes the same live phase-B current through WallboxDynamicPowerModel.
 const projectedCurrents = computed(() => {
   const state = currentDeviceStateForModel.value;
   return projectLiveScaledBuildingCurrents({
     measuredCurrents: measuredCurrents.value,
     heatpumpLevel: state.heatpumpLevel,
-    wallboxMask: state.wallboxMask,
+    wallboxMask: rawWallboxMask.value ?? state.wallboxMask,
     batteryCharging: state.batteryCharging,
   });
 });
@@ -725,8 +825,10 @@ const heatpumpMode = computed(() => {
 });
 
 const wallboxLevel = computed(() => {
-  if (_.wallbox.r0 === null || _.wallbox.r1 === null) return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
-  return (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
+  const confirmed = numberOrNull(_.wallbox.confirmedMask);
+  if (confirmed !== null) return clampInt(confirmed, 0, 3);
+  if (rawWallboxMask.value !== null) return clampInt(rawWallboxMask.value, 0, 3);
+  return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
 });
 
 const batteryCharging = computed(() => (_.battery.charging === null ? null : _.battery.charging === true));
@@ -863,6 +965,11 @@ const applyAgentDeviceState = state => {
     const targetR0 = (targetWallbox & 1) !== 0;
     const targetR1 = (targetWallbox & 2) !== 0;
 
+    // Treat the two physical Shelly outputs as one logical Wallbox command.
+    // Confirm the model/agent mask only when the combined physical state
+    // reaches this target; intermediate relay states stay raw-only.
+    beginWallboxTarget(targetWallbox);
+
     // Keep the last confirmed Shelly state visible while a new command is in
     // flight. Do not set r0/r1 to null: that used to invalidate the global
     // control gate until the next (sometimes >10 s delayed) Shelly status.
@@ -904,8 +1011,9 @@ const onEnergyMeter = payload => {
 
   measured.source_type = 'measured';
 
-  // Building current is not produced by multiplying Shelly current. The actual
-  // projected values are computed from confirmed Branch-A/B/Battery state.
+  // The measured snapshot is the shared physical source for the live-scaled
+  // Current Card and the current-state Wallbox/Battery P/Q -> VUF adapters.
+  // Candidate prediction and command completion still use logical device state.
   const projected = {
     source_type: 'digital_twin_from_real_state',
     projection_model: 'pq_profile_scaled_to_building_capacity_v1',
@@ -1010,10 +1118,27 @@ const onWallbox = data => {
   const output = boolOrNull(data?.output);
   if (data.id === 0 && output !== null) { _.wallbox.r0 = output; _.wallbox.r0Update = performance.now(); }
   else if (data.id === 1 && output !== null) { _.wallbox.r1 = output; _.wallbox.r1Update = performance.now(); }
+  else return;
 
-  if (_.wallbox.r0 !== null && _.wallbox.r1 !== null) {
-    _.wallbox.load = (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
+  const observedMask = rawWallboxMask.value;
+  if (observedMask === null) return;
+
+  if (_.wallbox.targetMask !== null) {
+    // Atomic command confirmation: mask1 -> mask2 is committed only after
+    // both relay reports together form mask2. Transient mask0/mask3 never
+    // becomes the AI/Digital-Twin device state.
+    if (observedMask === _.wallbox.targetMask) {
+      commitWallboxMask(observedMask);
+      _.wallbox.targetMask = null;
+      clearWallboxTargetTimer();
+      clearWallboxCommitTimer();
+    }
+    return;
   }
+
+  // External/manual Shelly changes have no target metadata. Debounce the
+  // combined mask so two closely spaced relay updates are committed once.
+  scheduleExternalWallboxCommit();
 };
 
 const onBattery = data => {
@@ -1074,17 +1199,11 @@ const cancelElectricalCalibration = async () => {
 };
 
 const toggleWallbox = r => {
-  if (!controlReady.value) return;
-  if (r === 0) {
-    if (_.wallbox.r0 === null) return;
-    const state = !_.wallbox.r0;
-    App.WallboxService.set(0, state);
-    return;
-  }
-
-  if (_.wallbox.r1 === null) return;
-  const state = !_.wallbox.r1;
-  App.WallboxService.set(1, state);
+  if (!controlReady.value || _.wallbox.r0 === null || _.wallbox.r1 === null) return;
+  const nextR0 = r === 0 ? !_.wallbox.r0 : _.wallbox.r0;
+  const nextR1 = r === 1 ? !_.wallbox.r1 : _.wallbox.r1;
+  beginWallboxTarget(wallboxMaskFromRelays(nextR0, nextR1));
+  App.WallboxService.set(r, r === 0 ? nextR0 : nextR1);
 };
 
 const updateHeatpumpLoad = value => {
@@ -1340,6 +1459,8 @@ onMounted(init);
 
 onUnmounted(() => {
   if (animationFrame) cancelAnimationFrame(animationFrame);
+  clearWallboxCommitTimer();
+  clearWallboxTargetTimer();
   unwatchConnection?.();
   unwatchConnection = null;
   unwatchStartupChecklist?.();
@@ -1554,7 +1675,7 @@ onUnmounted(() => {
         :angles="displayPhasorAngles"
       />
 
-      <VufCard :vuf="displayCurrentVuf" :baseline-vuf="displayBaselineVuf" :load-impact-vuf="displayLoadImpactVuf" />
+      <VufCard :vuf="displayCurrentVuf" :baseline-vuf="displayBaselineVuf" :load-impact-vuf="displayLoadImpactVuf" :sample-ts="_.energy_meter.lastUpdate" />
     </div>
 
     <div class="agent-section">
