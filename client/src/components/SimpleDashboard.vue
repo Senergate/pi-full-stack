@@ -20,6 +20,7 @@ import {
 import { BATTERY_CONTROL_INTERNALS, CONTROL_INPUT_SPECS, cloneControlPolicyDefaults } from '../ControlPolicyConfig.js';
 import { formatControlValue, validateControlInput, validateControlPolicyRelations, validateDecimalInput } from '../ControlInputValidation.js';
 import { applyBatteryPowerToModel, batteryPowerForCurrent } from '../BatteryDynamicPowerModel.js';
+import { applyHeatpumpPowerToModel, heatpumpPhysicalActiveForMeasurement, heatpumpPowerForCurrent } from '../HeatpumpDynamicPowerModel.js';
 import { PROTOTYPE_CURRENT_REFERENCE_MAX_A, projectLiveScaledBuildingCurrents } from '../PrototypeCurrentTwinModel.js';
 import { applyWallboxPowerToModel, wallboxPhysicalActiveForMeasurement, wallboxPowerForCurrent } from '../WallboxDynamicPowerModel.js';
 import {
@@ -81,7 +82,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-b-wallbox-vuf-live-sync-fix';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-b-phase2-model-consistency-fix';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -579,6 +580,44 @@ const modelWithBatteryCurrent = (model, currentA, { fallbackToFull = true, prefe
   return applyBatteryPowerToModel(model, dynamicBattery);
 };
 
+const heatpumpLiveBuildingPower = computed(() => {
+  const measuredCurrent = numberOrNull(measuredCurrents.value.a);
+  if (measuredCurrent === null) return null;
+
+  const baseline = activeProfiles.value?.baseline?.measured?.a;
+  const rawP = numberOrNull(_.energy_meter.raw?.a_act_power);
+  const rawS = firstNumber(
+    _.energy_meter.raw?.a_aprt_power,
+    _.energy_meter.raw?.a_apparent_power,
+    numberOrNull(_.energy_meter.raw?.a_voltage) !== null && numberOrNull(_.energy_meter.raw?.a_current) !== null
+      ? Math.abs(Number(_.energy_meter.raw.a_voltage) * Number(_.energy_meter.raw.a_current))
+      : null,
+  );
+  const baselineP = firstNumber(baseline?.p_w, baseline?.active_power_w);
+  const baselineQ = firstNumber(baseline?.q_var, baseline?.reactive_power_var);
+
+  // Prefer calibrated incremental Shelly P/Q when a valid OFF baseline exists.
+  // If calibration is unavailable, buildingPowerModel falls back to live-current
+  // scaling of the Heatpump full P/Q profile below.
+  if (rawP === null || rawS === null || baselineP === null || baselineQ === null || rawS + 1e-6 < Math.abs(rawP)) return null;
+
+  const rawQ = Math.sqrt(Math.max(0, rawS * rawS - rawP * rawP));
+  const deltaP = Math.max(0, rawP - baselineP);
+  const deltaQ = rawQ - baselineQ;
+  const referenceCurrent = PROTOTYPE_CURRENT_REFERENCE_MAX_A.heatpump;
+  const saturationFactor = measuredCurrent > referenceCurrent && measuredCurrent > 1e-9
+    ? referenceCurrent / measuredCurrent
+    : 1;
+  const ratio = Math.max(0, Math.min(1, measuredCurrent / referenceCurrent));
+  const scale = BUILDING_TARGETS.heatpumpMaxCurrentA / referenceCurrent;
+  return {
+    p: deltaP * scale * saturationFactor,
+    q: deltaQ * scale * saturationFactor,
+    ratio,
+    source: 'live_shelly_delta_pq_scaled_heatpump_saturated',
+  };
+});
+
 const buildingPowerModel = computed(() => {
   const state = currentDeviceStateForModel.value;
   let model = modelBuildingPowers({
@@ -589,6 +628,37 @@ const buildingPowerModel = computed(() => {
     phaseVoltages: baselineModel.value.voltages,
   });
   if (!model) return null;
+
+  // Current-state Heatpump VUF follows the same live Shelly phase-A current
+  // used by the Current Card. A calibrated incremental P/Q measurement is
+  // preferred; otherwise the full Heatpump profile is scaled by live current.
+  if (state.heatpumpLevel !== null && state.heatpumpLevel !== undefined) {
+    const liveHeatpumpCurrentA = measuredCurrents.value.a;
+    const heatpumpPhysicalActive = heatpumpPhysicalActiveForMeasurement({
+      currentA: liveHeatpumpCurrentA,
+      fallbackActive: Number(state.heatpumpLevel) > 0,
+    });
+    if (!heatpumpPhysicalActive) {
+      model = applyHeatpumpPowerToModel(model, { p: 0, q: 0, ratio: 0, source: 'heatpump_off' });
+    } else if (heatpumpLiveBuildingPower.value) {
+      model = applyHeatpumpPowerToModel(model, heatpumpLiveBuildingPower.value);
+    } else {
+      const fullHeatpump = modelAssetPower({
+        profiles: activeProfiles.value,
+        assetName: 'heatpump',
+        state: HEATPUMP_LEVELS,
+        voltageV: baselineModel.value.voltages.a,
+      });
+      const dynamicHeatpump = heatpumpPowerForCurrent({
+        fullPower: fullHeatpump,
+        fallbackPower: model.powers?.a,
+        currentA: liveHeatpumpCurrentA,
+        referenceMaxA: PROTOTYPE_CURRENT_REFERENCE_MAX_A.heatpump,
+        active: true,
+      });
+      model = applyHeatpumpPowerToModel(model, dynamicHeatpump);
+    }
+  }
 
   // Current-state Wallbox VUF follows the same live Shelly current used by the
   // Building-Twin current card. Candidate prediction below remains state based
@@ -911,24 +981,61 @@ const agentDeviceStates = computed(() => ({
   batteryCharging: batteryCharging.value,
 }));
 
-const predictVufForDeviceState = candidate => {
-  let model = modelBuildingPowers({
+const applyCounterfactualProfilePower = (model, assetName, state) => {
+  const phase = assetName === 'heatpump' ? 'a' : assetName === 'wallbox' ? 'b' : 'c';
+  const voltageV = baselineModel.value.voltages?.[phase];
+  const profilePower = modelAssetPower({
     profiles: activeProfiles.value,
-    heatpumpLevel: candidate.heatpump,
-    wallboxMask: candidate.wallbox,
-    batteryCharging: candidate.batteryCharging,
-    phaseVoltages: baselineModel.value.voltages,
+    assetName,
+    state,
+    voltageV,
   });
+  const dynamic = {
+    p: profilePower.p,
+    q: profilePower.q,
+    ratio: null,
+    source: `counterfactual_profile_${assetName}_${state}`,
+  };
+  if (assetName === 'heatpump') return applyHeatpumpPowerToModel(model, dynamic);
+  if (assetName === 'wallbox') return applyWallboxPowerToModel(model, dynamic);
+  return applyBatteryPowerToModel(model, dynamic);
+};
+
+const predictVufForDeviceState = candidate => {
+  const current = currentDeviceStateForModel.value;
+  const candidateState = {
+    heatpump: numberOrNull(candidate?.heatpump),
+    wallbox: numberOrNull(candidate?.wallbox),
+    batteryCharging: candidate?.batteryCharging === true,
+  };
+  if (candidateState.heatpump === null || candidateState.wallbox === null || candidate?.batteryCharging === null || candidate?.batteryCharging === undefined) return null;
+
+  // Counterfactual freeze: start from the current physical live-P/Q model.
+  // Unchanged assets remain exactly at their current measured operating point;
+  // only assets that actually change are replaced by the target profile. This
+  // prevents artificial P/Q jumps from contaminating predicted ΔVUF.
+  let model = buildingPowerModel.value;
   if (!model) return null;
 
-  if (candidate.batteryCharging === true) {
-    // OFF -> ON counterfactual: use the operator-configurable conservative
-    // steady-state prediction. If Battery is already physically ON, keep the
-    // current candidate evaluation tied to the live measured charging current.
-    const batteryPredictionA = batteryCharging.value === true
-      ? batteryMeasuredCurrentA.value
-      : Number(_.controlPolicy.batteryPredictedOnCurrentA);
-    model = modelWithBatteryCurrent(model, batteryPredictionA, { fallbackToFull: true, preferMeasuredPq: batteryCharging.value === true });
+  if (candidateState.heatpump !== Number(current.heatpumpLevel)) {
+    model = applyCounterfactualProfilePower(model, 'heatpump', clampInt(candidateState.heatpump, 0, HEATPUMP_LEVELS));
+  }
+
+  if (candidateState.wallbox !== Number(current.wallboxMask)) {
+    model = applyCounterfactualProfilePower(model, 'wallbox', clampInt(candidateState.wallbox, 0, 3));
+  }
+
+  if (candidateState.batteryCharging !== (current.batteryCharging === true)) {
+    if (candidateState.batteryCharging) {
+      model = applyCounterfactualProfilePower(model, 'battery', 1);
+      model = modelWithBatteryCurrent(
+        model,
+        Number(_.controlPolicy.batteryPredictedOnCurrentA),
+        { fallbackToFull: true, preferMeasuredPq: false },
+      );
+    } else {
+      model = applyCounterfactualProfilePower(model, 'battery', 0);
+    }
   }
 
   const result = PhasorCalculator.analyzeVUFIncrementalPQ({

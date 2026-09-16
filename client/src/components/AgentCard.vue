@@ -61,7 +61,8 @@
           </div>
           <div class="feedback-lines">
             <span>Current {{ Number.isFinite(Number(batteryMeasuredCurrentA)) ? `${Number(batteryMeasuredCurrentA).toFixed(2)} A` : '--' }}</span>
-            <span>Stable updates {{ batteryRamp.stableCount }}/{{ BATTERY_CONTROL_INTERNALS.batteryStableSamples }} · ΔI ≤ {{ BATTERY_CONTROL_INTERNALS.batteryStableDeltaA.toFixed(2) }} A</span>
+            <span>Stable updates {{ batteryRamp.stableCount }}/{{ BATTERY_CONTROL_INTERNALS.batteryStableSamples }} · stable window {{ (batteryRamp.stableDurationMs / 1000).toFixed(1) }} s</span>
+            <span>Slope {{ Number.isFinite(batteryRamp.slopeAperS) ? `${batteryRamp.slopeAperS.toFixed(3)} A/s` : '--' }} · limit ≤ {{ BATTERY_CONTROL_INTERNALS.batteryStableSlopeAperS.toFixed(2) }} A/s</span>
           </div>
         </div>
       </div>
@@ -141,6 +142,7 @@
 
         <small v-if="pendingDevices.batteryCharging" class="pending-note">pending → {{ pendingTargetState.batteryCharging ? 'ON' : 'OFF' }}</small>
         <small v-else-if="normalizedDeviceStates.batteryCharging === null" class="pending-note">waiting for battery status</small>
+        <small v-if="normalizedDeviceStates.batteryCharging === true" class="pending-note">stabilization confidence: {{ batteryStabilizationConfidence.toUpperCase() }}</small>
 
         <button
           type="button"
@@ -180,6 +182,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { classifyVuf, formatVufPercent } from '../VufPresentation.js';
 import { BATTERY_CONTROL_INTERNALS, CONTROL_POLICY_DEFAULTS, PROTOTYPE_CURRENT_CURVES_A } from '../ControlPolicyConfig.js';
+import { updateBatteryStabilizationWindow } from '../BatteryStabilizationModel.js';
 
 const TICK_MS = 250;
 const MAX_HEATPUMP = 5;
@@ -277,10 +280,14 @@ const batteryRamp = reactive({
   startedAt: 0,
   lastSampleToken: null,
   lastCurrentA: null,
+  samples: [],
   stableCount: 0,
+  stableDurationMs: 0,
+  slopeAperS: null,
   stableReady: false,
   hardOverrideAttempted: false,
 });
+const batteryStabilizationConfidence = ref('unknown');
 
 const batteryEffective = computed(() => {
   if (normalizedDeviceStates.value.batteryCharging !== true) return true;
@@ -374,13 +381,17 @@ const resetBatteryRamp = () => {
   batteryRamp.startedAt = 0;
   batteryRamp.lastSampleToken = null;
   batteryRamp.lastCurrentA = null;
+  batteryRamp.samples = [];
   batteryRamp.stableCount = 0;
+  batteryRamp.stableDurationMs = 0;
+  batteryRamp.slopeAperS = null;
   batteryRamp.stableReady = false;
   batteryRamp.hardOverrideAttempted = false;
 };
 
 const startBatteryRamp = () => {
   resetBatteryRamp();
+  batteryStabilizationConfidence.value = 'ramping';
   batteryRamp.active = true;
   batteryRamp.startedAt = Date.now();
   agentState.value = 'battery_ramping';
@@ -396,15 +407,19 @@ const finishBatteryRamp = reason => {
   if (!batteryRamp.active) return;
   const current = Number(props.batteryMeasuredCurrentA);
   const elapsed = Math.max(0, Date.now() - batteryRamp.startedAt);
+  const stableDuration = batteryRamp.stableDurationMs;
+  const slope = batteryRamp.slopeAperS;
   resetBatteryRamp();
+  batteryStabilizationConfidence.value = reason === 'stable' ? 'high' : 'low';
   agentState.value = 'adjusting';
   cooldownUntil.value = Date.now();
   const currentText = Number.isFinite(current) ? `${current.toFixed(2)} A` : 'unknown current';
+  const slopeText = Number.isFinite(slope) ? `${slope.toFixed(3)} A/s` : '--';
   addLog(
-    reason === 'stable' ? 'Battery current stabilized' : 'Battery stabilization timeout',
+    reason === 'stable' ? 'Battery current stabilized · HIGH confidence' : 'Battery stabilization timeout · LOW confidence',
     reason === 'stable'
-      ? `${currentText} after ${(elapsed / 1000).toFixed(1)} s. Normal AI optimization may resume.`
-      : `No stable-current confirmation within ${(BATTERY_CONTROL_INTERNALS.batteryMaxSettleMs / 1000).toFixed(1)} s. Continue with the latest measured Battery state (${currentText}) and low stabilization confidence.`,
+      ? `${currentText} after ${(elapsed / 1000).toFixed(1)} s. Stable window ${(stableDuration / 1000).toFixed(1)} s, slope ${slopeText}. Normal AI optimization may resume.`
+      : `No high-confidence stabilization within ${(BATTERY_CONTROL_INTERNALS.batteryMaxSettleMs / 1000).toFixed(1)} s. Continue with the latest measured Battery state (${currentText}) but mark stabilization confidence LOW.`,
     reason === 'stable' ? 'success' : 'warning'
   );
 };
@@ -413,7 +428,7 @@ const maybeFinishStableBatteryRamp = () => {
   if (!batteryRamp.active || hasPendingDevice.value) return;
   const elapsed = Date.now() - batteryRamp.startedAt;
   if (elapsed < BATTERY_CONTROL_INTERNALS.batteryMinSettleMs) return;
-  if (batteryRamp.stableReady || batteryRamp.stableCount >= BATTERY_CONTROL_INTERNALS.batteryStableSamples) finishBatteryRamp('stable');
+  if (batteryRamp.stableReady) finishBatteryRamp('stable');
 };
 
 watch(hasPendingDevice, (pending, previous) => {
@@ -449,24 +464,34 @@ watch(() => props.batteryMeasurementToken, token => {
   const current = Number(props.batteryMeasuredCurrentA);
   if (!Number.isFinite(current)) return;
 
-  const elapsed = Date.now() - batteryRamp.startedAt;
-  if (batteryRamp.lastCurrentA !== null) {
-    const delta = Math.abs(current - batteryRamp.lastCurrentA);
-    if (elapsed >= BATTERY_CONTROL_INTERNALS.batteryMinSettleMs && delta <= BATTERY_CONTROL_INTERNALS.batteryStableDeltaA) {
-      batteryRamp.stableCount += 1;
-    } else {
-      batteryRamp.stableCount = 0;
-    }
-  }
+  const evaluated = updateBatteryStabilizationWindow({
+    samples: batteryRamp.samples,
+    startedAtMs: batteryRamp.startedAt,
+    nowMs: Date.now(),
+    currentA: current,
+    minSettleMs: BATTERY_CONTROL_INTERNALS.batteryMinSettleMs,
+    stableDeltaA: BATTERY_CONTROL_INTERNALS.batteryStableDeltaA,
+    stableSamples: BATTERY_CONTROL_INTERNALS.batteryStableSamples,
+    stableDurationMs: BATTERY_CONTROL_INTERNALS.batteryStableDurationMs,
+    stableSlopeAperS: BATTERY_CONTROL_INTERNALS.batteryStableSlopeAperS,
+  });
+
+  batteryRamp.samples = evaluated.samples;
   batteryRamp.lastCurrentA = current;
-  batteryRamp.stableReady = batteryRamp.stableCount >= BATTERY_CONTROL_INTERNALS.batteryStableSamples;
+  batteryRamp.stableCount = evaluated.stableCount;
+  batteryRamp.stableDurationMs = evaluated.stableDurationMs;
+  batteryRamp.slopeAperS = evaluated.slopeAperS;
+  batteryRamp.stableReady = evaluated.stableReady;
   maybeFinishStableBatteryRamp();
 });
 
 watch(() => normalizedDeviceStates.value.batteryCharging, charging => {
-  if (charging === false && batteryRamp.active) {
-    resetBatteryRamp();
+  if (charging === false) {
+    if (batteryRamp.active) resetBatteryRamp();
+    batteryStabilizationConfidence.value = 'idle';
     if (autoEnabled.value && !hasPendingDevice.value) agentState.value = 'monitoring';
+  } else if (charging === true && !batteryRamp.active && batteryStabilizationConfidence.value === 'idle') {
+    batteryStabilizationConfidence.value = 'unknown';
   }
 });
 
@@ -511,6 +536,7 @@ const agentStateDescription = computed(() => {
   if (agentState.value === 'pending') return 'A control command is waiting for physical execution feedback.';
   if (agentState.value === 'battery_ramping') return 'Battery is ON and ramping. Current-state VUF follows live Battery current/P+Q; normal optimization is paused unless a hard site limit is reached.';
   if (agentState.value === 'adjusting') return 'Execution confirmed. Waiting for the deterministic post-action settling window.';
+  if (normalizedDeviceStates.value.batteryCharging === true && batteryStabilizationConfidence.value === 'low') return 'Battery is ON with LOW stabilization confidence after timeout. Current-state VUF still follows live measurement; control decisions remain explicitly marked as low-confidence Battery context.';
   return 'Battery-priority VUF control is monitoring raw model-estimated VUF. CUF/load-unbalance control is intentionally deferred.';
 });
 
@@ -720,6 +746,7 @@ const selectAndApplyState = async (repeatedViolation, { fromBatteryRampHardOverr
     if (fromBatteryRampHardOverride && batteryRamp.active && !batteryOffOverride) resumeBatteryRampAfterAction.value = true;
     if (batteryOffOverride) {
       resetBatteryRamp();
+      batteryStabilizationConfidence.value = 'idle';
       resumeBatteryRampAfterAction.value = false;
     }
     markPending(patch, { heatpumpMode: Object.hasOwn(patch, 'heatpump') ? (patch.heatpump === 0 ? 'zero_hold' : 'start') : null });
@@ -728,7 +755,7 @@ const selectAndApplyState = async (repeatedViolation, { fromBatteryRampHardOverr
     emit('apply-state', patch);
     addLog(
       action.reason === 'battery_priority' ? 'Battery-priority action selected' : action.reason === 'headroom_derating' ? 'Headroom derating selected' : 'Best one-step balancing action selected',
-      [`Heat pump ${action.state.heatpump}/5`, `Wallbox ${action.state.wallbox}/3`, `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`, `Predicted VUF ${formatVuf(action.vuf)}`, 'Voltage guard 207–253 V: OK'].join(' · '),
+      [`Heat pump ${action.state.heatpump}/5`, `Wallbox ${action.state.wallbox}/3`, `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`, `Battery confidence ${batteryStabilizationConfidence.value.toUpperCase()}`, `Predicted VUF ${formatVuf(action.vuf)}`, 'Voltage guard 207–253 V: OK'].join(' · '),
       'action'
     );
     agentState.value = 'pending';
@@ -833,6 +860,7 @@ const toggleAuto = () => {
   cooldownUntil.value = 0;
   if (!autoEnabled.value) {
     resetBatteryRamp();
+    batteryStabilizationConfidence.value = normalizedDeviceStates.value.batteryCharging === true ? 'unknown' : 'idle';
     aiBatteryTurnOnExpected.value = false;
     resumeBatteryRampAfterAction.value = false;
   }

@@ -17,6 +17,8 @@ export const BATTERY_CONTROL_INTERNALS = Object.freeze({
   batteryMinSettleMs: 3000,
   batteryStableDeltaA: 0.02,
   batteryStableSamples: 3,
+  batteryStableDurationMs: 1000,
+  batteryStableSlopeAperS: 0.02,
   batteryMaxSettleMs: 10000,
   wallboxSettleMs: 2000,
   heatpumpSettleMs: 5000,
