@@ -1,0 +1,11 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const config = fs.readFileSync(new URL('../client/src/ControlPolicyConfig.js', import.meta.url), 'utf8');
+const dashboard = fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue', import.meta.url), 'utf8');
+assert.match(config, /batteryEffectiveMinA:\s*0\.10/);
+assert.match(config, /siteMaxTotalPowerW:\s*0/);
+assert.match(config, /siteMaxPhaseCurrentA:\s*0/);
+assert.match(config, /deSinglePhaseSymmetryReferenceVA:\s*4600/);
+assert.match(dashboard, /AI Control Thresholds/);
+assert.match(dashboard, /DISABLED \(original behavior preserved\)/);
+console.log('control_policy_config_static_test: OK');

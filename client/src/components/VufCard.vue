@@ -66,7 +66,6 @@ const graphContainer = ref(null);
 
 const GRAPH_HEIGHT = 150;
 const SECONDS_VISIBLE = 10;
-const SAMPLE_INTERVAL_MS = 500;
 
 const MIN_VUF = 0;
 const MAX_VUF = 4.0;
@@ -80,8 +79,6 @@ const graphState = reactive({
   animationFrame: null,
   resizeObserver: null,
 });
-
-let sampleTimer = null;
 
 const safeVuf = computed(() => numberOrNullVuf(props.vuf));
 
@@ -119,10 +116,6 @@ const addPoint = value => {
   if (graphState.data.length > MAX_POINTS) {
     graphState.data.splice(0, graphState.data.length - MAX_POINTS);
   }
-};
-
-const sampleCurrentVuf = () => {
-  addPoint(safeVuf.value);
 };
 
 const resizeCanvas = () => {
@@ -380,19 +373,10 @@ onMounted(() => {
     graphState.resizeObserver.observe(graphContainer.value);
   }
 
-  // A time-based chart must keep sampling even when the VUF value is constant.
-  // The value-change watcher below still adds an immediate point for step changes.
-  sampleTimer = window.setInterval(sampleCurrentVuf, SAMPLE_INTERVAL_MS);
-
   graphState.animationFrame = requestAnimationFrame(drawGraph);
 });
 
 onUnmounted(() => {
-  if (sampleTimer !== null) {
-    window.clearInterval(sampleTimer);
-    sampleTimer = null;
-  }
-
   if (graphState.animationFrame) {
     cancelAnimationFrame(graphState.animationFrame);
   }

@@ -1,0 +1,1 @@
+Variant A: current v1.5.1 AI behavior preserved. New threshold/configuration panel is monitoring/config only; site hard limits default to 0=disabled.

@@ -17,6 +17,8 @@ import {
   classifyBranchAStatusForCommand,
   shouldCompleteBranchACommand,
 } from '../BranchACommandCorrelation.js';
+import { cloneControlPolicyDefaults } from '../ControlPolicyConfig.js';
+import { projectLiveScaledBuildingCurrents } from '../PrototypeCurrentTwinModel.js';
 import {
   DEFAULT_ELECTRICAL_PROFILES,
   baselineVoltagesFromProfiles,
@@ -74,7 +76,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.1-branchAB-vuf23-runtime-fix';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-a-real-current-live-twin';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -110,6 +112,7 @@ const _ = reactive({
     calibration: { running: false, progress: { stage: 'idle', index: 0, total: 0, message: '' } },
   },
   agent: { enabled: false },
+  controlPolicy: cloneControlPolicyDefaults('current_v151'),
   mqtt: { connected: false, lastHeartbeatAt: null },
   startup: {
     phase: 'connecting',
@@ -141,9 +144,7 @@ const heatpumpTwinUsesCommandTrajectory = computed(() => {
 });
 
 const currentSourceLabel = computed(() =>
-  heatpumpTwinUsesCommandTrajectory.value
-    ? 'BUILDING-SCALE DIGITAL TWIN · P/Q COMMAND TRAJECTORY (execution pending)'
-    : 'BUILDING-SCALE DIGITAL TWIN · P/Q PROFILE FROM REAL execution state'
+  'BUILDING TWIN · LIVE-SCALED FROM SHELLY · REAL PROTOTYPE CURRENT CURVES'
 );
 const currentYRange = computed(() => ({ min: 0, max: 100 }));
 const STARTUP_TIMEOUT_MS = 6000;
@@ -395,14 +396,17 @@ const vufResult = computed(() => {
   });
 });
 
+// MODELED current display for Variant A.
+// The P/Q/VUF control model is intentionally unchanged; only the current bars
+// use the live measured-current scaling model requested for Variant A.
 const projectedCurrents = computed(() => {
-  const values = vufResult.value?.currentMagnitudes;
-  if (!values) return { a: null, b: null, c: null };
-  return {
-    a: numberOrNull(values.a),
-    b: numberOrNull(values.b),
-    c: numberOrNull(values.c),
-  };
+  const state = currentDeviceStateForModel.value;
+  return projectLiveScaledBuildingCurrents({
+    measuredCurrents: measuredCurrents.value,
+    heatpumpLevel: state.heatpumpLevel,
+    wallboxMask: state.wallboxMask,
+    batteryCharging: state.batteryCharging,
+  });
 });
 
 const currentVuf = computed(() => numberOrNull(vufResult.value?.vufPercent));
@@ -582,6 +586,40 @@ const wallboxLevel = computed(() => {
 });
 
 const batteryCharging = computed(() => (_.battery.charging === null ? null : _.battery.charging === true));
+
+
+const measuredTotalPowerW = computed(() => {
+  const values = ['a_act_power', 'b_act_power', 'c_act_power']
+    .map(key => numberOrNull(_.energy_meter.measured?.[key]))
+    .filter(value => value !== null);
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + Math.max(0, value), 0);
+});
+
+const batteryMeasuredCurrentA = computed(() => {
+  if (batteryCharging.value !== true) return 0;
+  const rawCurrent = numberOrNull(_.energy_meter.raw?.c_current);
+  const baselineRawCurrent = numberOrNull(activeProfiles.value?.baseline?.measured?.c?.current_a);
+  if (rawCurrent !== null && baselineRawCurrent !== null) return Math.max(0, rawCurrent - baselineRawCurrent);
+  return measuredCurrents.value.c;
+});
+
+const siteLimitsEnabled = computed(() =>
+  Number(_.controlPolicy.siteMaxTotalPowerW) > 0 || Number(_.controlPolicy.siteMaxPhaseCurrentA) > 0
+);
+
+const siteHeadroomRatio = computed(() => {
+  const ratios = [];
+  const pMax = Number(_.controlPolicy.siteMaxTotalPowerW);
+  if (pMax > 0 && measuredTotalPowerW.value !== null) ratios.push(measuredTotalPowerW.value / pMax);
+  const iMax = Number(_.controlPolicy.siteMaxPhaseCurrentA);
+  if (iMax > 0) {
+    for (const current of Object.values(measuredCurrents.value)) {
+      if (current !== null) ratios.push(current / iMax);
+    }
+  }
+  return ratios.length > 0 ? Math.max(...ratios) : null;
+});
 
 const agentDeviceStates = computed(() => ({
   heatpump: heatpumpLevel.value,
@@ -1215,6 +1253,69 @@ onUnmounted(() => {
         <span>Battery: building equivalent · max 40 A</span>
       </div>
 
+
+
+      <div class="control-policy-panel">
+        <div class="control-policy-head">
+          <div>
+            <strong>AI Control Thresholds / Regler-Schwellen / AI 控制阈值</strong>
+            <p>
+              Site hard limits use 0 = disabled so the new configuration does not change the original runtime by default.
+              / 现场硬限制以 0=禁用为默认值，因此新增参数默认不会改变原程序运行。
+            </p>
+          </div>
+          <span class="grid-provenance">{{ _.controlPolicy.strategy.toUpperCase() }}</span>
+        </div>
+
+        <div class="grid-derived control-reference-row">
+          <span>DE VDE symmetry reference: ≤ {{ (_.controlPolicy.deSinglePhaseSymmetryReferenceVA / 1000).toFixed(1) }} kVA ≈ {{ _.controlPolicy.deSinglePhaseSymmetryReferenceA }} A @ 230 V</span>
+          <span>NOT a total L1/L2/L3 load limit</span>
+          <span>Prototype engineering baseline: ≤ {{ (_.controlPolicy.prototypeEngineeringPowerLimitW / 1000).toFixed(1) }} kW · &lt;{{ _.controlPolicy.prototypeEngineeringCurrentGuideA }} A</span>
+        </div>
+
+        <div class="control-policy-grid">
+          <label>
+            <span>Site max total power [W] · 0=OFF</span>
+            <input v-model.number="_.controlPolicy.siteMaxTotalPowerW" type="number" min="0" step="100" />
+          </label>
+          <label>
+            <span>Site max phase current [A] · 0=OFF</span>
+            <input v-model.number="_.controlPolicy.siteMaxPhaseCurrentA" type="number" min="0" step="0.1" />
+          </label>
+          <label>
+            <span>Battery effective min [A]</span>
+            <input v-model.number="_.controlPolicy.batteryEffectiveMinA" type="number" min="0" max="5" step="0.01" />
+          </label>
+          <label>
+            <span>VUF enter [%]</span>
+            <input v-model.number="_.controlPolicy.vufEnterPct" type="number" min="0" max="10" step="0.1" />
+          </label>
+          <label>
+            <span>VUF exit [%]</span>
+            <input v-model.number="_.controlPolicy.vufExitPct" type="number" min="0" max="10" step="0.1" />
+          </label>
+          <label>
+            <span>Warning ratio</span>
+            <input v-model.number="_.controlPolicy.warningRatio" type="number" min="0" max="1" step="0.01" />
+          </label>
+          <label>
+            <span>Pre-limit ratio</span>
+            <input v-model.number="_.controlPolicy.preLimitRatio" type="number" min="0" max="1" step="0.01" />
+          </label>
+          <label>
+            <span>Critical ratio</span>
+            <input v-model.number="_.controlPolicy.criticalRatio" type="number" min="0" max="1" step="0.01" />
+          </label>
+        </div>
+
+        <div class="grid-derived">
+          <span>Site hard-limit guard: {{ siteLimitsEnabled ? 'CONFIGURED' : 'DISABLED (original behavior preserved)' }}</span>
+          <span>Measured total P: {{ measuredTotalPowerW !== null ? `${measuredTotalPowerW.toFixed(0)} W` : '--' }}</span>
+          <span>Headroom ratio: {{ siteHeadroomRatio !== null ? `${(siteHeadroomRatio * 100).toFixed(1)}%` : '--' }}</span>
+          <span>Battery measured ΔI: {{ batteryMeasuredCurrentA !== null ? `${batteryMeasuredCurrentA.toFixed(2)} A` : '--' }}</span>
+        </div>
+      </div>
+
       <div class="electrical-profile-row">
         <div class="electrical-profile-info">
           <span class="profile-badge" :class="{ calibrated: electricalProfileSummary.calibrated, running: _.electricalModel.calibration.running }">{{ calibrationStatusLabel }}</span>
@@ -1282,5 +1383,5 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.electrical-profile-row{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-top:12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#081721}.electrical-profile-info{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#789aac;font-size:9px}.profile-badge,.voltage-guard{padding:5px 7px;border:1px solid #665c2d;border-radius:999px;color:#ffe795}.profile-badge.calibrated{border-color:#2b6f62;color:#8ff1c3}.profile-badge.running{border-color:#58e7ff;color:#58e7ff}.voltage-guard.safe{border-color:#2b6f62;color:#8ff1c3}.voltage-guard.unsafe{border-color:#6b3740;color:#ff8c97}.calibration-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.calibration-actions button{padding:7px 9px;border:1px solid #58e7ff;border-radius:8px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:9px;font-weight:700}.calibration-actions button.cancel{border-color:#6b3740;color:#ff9ba4}.calibration-actions button:disabled{cursor:not-allowed;opacity:.45}.calibration-actions small{max-width:420px;color:#6f91a3;font-size:8px}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.electrical-profile-row{flex-direction:column;align-items:flex-start}.calibration-actions{justify-content:flex-start}.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
+.control-policy-panel{margin-top:12px;padding:12px;border:1px solid #284b60;border-radius:12px;background:#081721}.control-policy-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.control-policy-head strong{font-size:11px}.control-policy-head p{margin:4px 0 0;color:#789aac;font-size:9px;line-height:1.45}.control-policy-grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-top:10px}.control-policy-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.control-policy-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.control-reference-row span:first-child{border-color:#665c2d;color:#ffe795}@media(max-width:1100px){.control-policy-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}@media(max-width:700px){.control-policy-head{flex-direction:column}.control-policy-grid{grid-template-columns:1fr}}.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.electrical-profile-row{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-top:12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#081721}.electrical-profile-info{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#789aac;font-size:9px}.profile-badge,.voltage-guard{padding:5px 7px;border:1px solid #665c2d;border-radius:999px;color:#ffe795}.profile-badge.calibrated{border-color:#2b6f62;color:#8ff1c3}.profile-badge.running{border-color:#58e7ff;color:#58e7ff}.voltage-guard.safe{border-color:#2b6f62;color:#8ff1c3}.voltage-guard.unsafe{border-color:#6b3740;color:#ff8c97}.calibration-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.calibration-actions button{padding:7px 9px;border:1px solid #58e7ff;border-radius:8px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:9px;font-weight:700}.calibration-actions button.cancel{border-color:#6b3740;color:#ff9ba4}.calibration-actions button:disabled{cursor:not-allowed;opacity:.45}.calibration-actions small{max-width:420px;color:#6f91a3;font-size:8px}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.electrical-profile-row{flex-direction:column;align-items:flex-start}.calibration-actions{justify-content:flex-start}.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
 </style>
