@@ -10,7 +10,7 @@
  */
 
 export const BATTERY_CONTROL_INTERNALS = Object.freeze({
-  referenceMaxA: 1.30,
+  referenceMaxA: 1.40,
   preLimitRatio: 0.90,
   hardRatio: 1.00,
   minVufImprovementPct: 0.01,

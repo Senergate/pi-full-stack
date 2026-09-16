@@ -5,7 +5,7 @@ import { validateControlInput, validateControlPolicyRelations } from '../client/
 assert.equal(CONTROL_POLICY_DEFAULTS.batteryPredictedOnCurrentA, 1.04);
 assert.equal(CONTROL_INPUT_SPECS.batteryPredictedOnCurrentA.min, 0.10);
 assert.equal(CONTROL_INPUT_SPECS.batteryPredictedOnCurrentA.max, 1.30);
-assert.equal(BATTERY_CONTROL_INTERNALS.referenceMaxA, 1.30);
+assert.equal(BATTERY_CONTROL_INTERNALS.referenceMaxA, 1.40);
 assert.equal(BATTERY_CONTROL_INTERNALS.preLimitRatio, 0.90);
 assert.equal(BATTERY_CONTROL_INTERNALS.hardRatio, 1.00);
 

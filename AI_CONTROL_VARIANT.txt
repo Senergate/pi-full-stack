@@ -1,16 +1,20 @@
 Senergate v1.5.1 AI Control Variant B
 Variant: battery_priority_v2_ramping
+Frontend build: v1.5.1-ai-b-ramping-ref140-collapsible-en
 Baseline: Senergate_pi-full-stack_REAL_HARDWARE_PQ_VUF_v1.5.1_BRANCH_AB_VUF23_RUNTIME_FIX_2026-09-12
 
 Integrated features:
 - Battery-priority VUF control
 - Battery OFF->ON prediction with configurable Battery predicted ON current (default 1.04 A, range 0.10-1.30 A)
+- Battery scaling/saturation reference maximum = 1.40 A (internal, not exposed as a normal UI parameter)
 - Battery current ramp/stabilization state using live Shelly current/P+Q
 - Normal AI optimization paused during BATTERY_RAMPING
 - Hard site-limit override remains active during pending/ramping
 - Live-scaled Building-Twin current display from measured prototype current curves
 - VUF history one-point hold fix (stable curve no longer disappears after 10 s)
-- Simplified user-visible Site Limits + AI Thresholds
+- Senergate Grid Impedance panel collapsible; default collapsed
+- Site Limits panel collapsible; default collapsed
+- AI Control Thresholds panel collapsible; default collapsed
 - Strict validated manual input: decimal point '.', max 2 decimal places, invalid drafts never applied
-- Grid-Impedance panel collapsible, default collapsed, UI state persisted; active impedance remains in model
-- CUF/Schieflast active control intentionally deferred
+- User-facing UI text is English only
+- CUF/load-unbalance active control intentionally deferred

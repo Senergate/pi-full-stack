@@ -4,7 +4,7 @@ const model = fs.readFileSync(new URL('../client/src/PrototypeCurrentTwinModel.j
 const cfg = fs.readFileSync(new URL('../client/src/ControlPolicyConfig.js', import.meta.url), 'utf8');
 assert.match(model, /PROTOTYPE_CURRENT_REFERENCE_MAX_A/);
 assert.match(model, /battery:\s*BATTERY_CONTROL_INTERNALS\.referenceMaxA/);
-assert.match(cfg, /referenceMaxA:\s*1\.30/);
+assert.match(cfg, /referenceMaxA:\s*1\.40/);
 assert.match(model, /Math\.min\(1, prototypeCurrent \/ referenceMax\)/);
 assert.match(model, /measuredCurrents\?\.c/);
 console.log('prototype_current_live_twin_static_test: PASS');

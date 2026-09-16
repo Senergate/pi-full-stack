@@ -79,7 +79,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-b-battery-ramping-validated-ui';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-b-ramping-ref140-collapsible-en';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -150,6 +150,12 @@ watch(gridImpedanceOpen, value => {
   if (typeof window === 'undefined') return;
   try { window.localStorage?.setItem(GRID_PANEL_STORAGE_KEY, value ? 'true' : 'false'); } catch { /* UI preference only */ }
 });
+
+// Operational configuration panels are intentionally collapsed on every page
+// load. Their visibility is UI-only and never changes the active controller
+// values or the underlying safety/control logic.
+const siteLimitsOpen = ref(false);
+const aiThresholdsOpen = ref(false);
 
 const policyDraft = reactive(Object.fromEntries(
   Object.keys(CONTROL_INPUT_SPECS).map(key => [key, formatControlValue(key, _.controlPolicy[key])])
@@ -1366,12 +1372,12 @@ onUnmounted(() => {
     <div class="startup-panel" :class="_.startup.phase">
       <div class="startup-head">
         <div>
-          <strong>Startup Initialization / 首次进入初始化检查</strong>
+          <strong>Startup Initialization</strong>
           <p>{{ _.startup.message }}</p>
         </div>
         <div class="startup-actions">
           <span class="startup-badge">{{ startupStatusLabel }}</span>
-          <button type="button" @click="retryInitialization">RECHECK / 重新检查</button>
+          <button type="button" @click="retryInitialization">RECHECK</button>
         </div>
       </div>
       <div class="startup-checks">
@@ -1384,17 +1390,16 @@ onUnmounted(() => {
         <span :class="{ ok: startupChecklist.battery }">Battery {{ startupChecklist.battery ? '✓' : '…' }}</span>
       </div>
       <p v-if="startupActiveDevices.length > 0" class="startup-warning">
-        Active state found / 检测到设备处于运行状态: {{ startupActiveDevices.join(' · ') }}. Browser startup does not send automatic STOP.
+        Active state found: {{ startupActiveDevices.join(' · ') }}. Browser startup does not send automatic STOP.
       </p>
     </div>
 
     <div class="grid-impedance-panel" :class="{ collapsed: !gridImpedanceOpen }">
       <div class="grid-panel-head">
         <div>
-          <strong>Senergate Grid Impedance / Netzimpedanz / 电网阻抗</strong>
+          <strong>Senergate Grid Impedance</strong>
           <p v-if="gridImpedanceOpen">
             MODELED building-scale feeder for the incremental P/Q Digital Twin. Hiding this panel changes only the UI; the active impedance values remain in the model.
-            / 增量 P/Q Digital Twin 使用建筑级馈线模型。折叠面板只影响显示，当前阻抗值仍继续参与模型计算。
           </p>
         </div>
         <div class="grid-panel-actions">
@@ -1433,77 +1438,91 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="site-limits-panel control-policy-panel">
+    <div class="site-limits-panel control-policy-panel" :class="{ collapsed: !siteLimitsOpen }">
       <div class="control-policy-head">
         <div>
           <strong>Site Limits</strong>
-          <p>0 = disabled. Values are site/connection/protection specific; they are not universal legal limits.</p>
+          <p v-if="siteLimitsOpen">0 = disabled. Values are site/connection/protection specific; they are not universal legal limits.</p>
         </div>
-        <span class="grid-provenance">{{ siteLimitsEnabled ? 'CONFIGURED' : 'DISABLED' }}</span>
+        <div class="control-policy-actions">
+          <span class="grid-provenance">{{ siteLimitsEnabled ? 'CONFIGURED' : 'DISABLED' }}</span>
+          <button type="button" class="collapse-button" :aria-expanded="siteLimitsOpen" @click="siteLimitsOpen = !siteLimitsOpen">
+            {{ siteLimitsOpen ? 'HIDE' : 'SHOW' }}
+          </button>
+        </div>
       </div>
 
-      <div class="grid-derived control-reference-row">
-        <span>DE VDE symmetry reference: ≤ {{ (_.controlPolicy.deSinglePhaseSymmetryReferenceVA / 1000).toFixed(1) }} kVA ≈ {{ _.controlPolicy.deSinglePhaseSymmetryReferenceA }} A @ 230 V</span>
-        <span>NOT a total L1/L2/L3 load limit</span>
-        <span>Prototype engineering baseline: ≤ {{ (_.controlPolicy.prototypeEngineeringPowerLimitW / 1000).toFixed(1) }} kW · &lt;{{ _.controlPolicy.prototypeEngineeringCurrentGuideA }} A</span>
-      </div>
+      <div v-if="siteLimitsOpen" class="control-policy-content">
+        <div class="grid-derived control-reference-row">
+          <span>German VDE symmetry reference: ≤ {{ (_.controlPolicy.deSinglePhaseSymmetryReferenceVA / 1000).toFixed(1) }} kVA ≈ {{ _.controlPolicy.deSinglePhaseSymmetryReferenceA }} A @ 230 V</span>
+          <span>NOT a total L1/L2/L3 load limit</span>
+          <span>Prototype engineering baseline: ≤ {{ (_.controlPolicy.prototypeEngineeringPowerLimitW / 1000).toFixed(1) }} kW · &lt;{{ _.controlPolicy.prototypeEngineeringCurrentGuideA }} A</span>
+        </div>
 
-      <div class="control-policy-grid two-columns">
-        <label :class="{ invalid: policyErrors.siteMaxTotalPowerW }">
-          <span>Maximum total power [W] · 0=OFF</span>
-          <input type="text" inputmode="decimal" :value="policyDraft.siteMaxTotalPowerW" @input="onPolicyDraftInput('siteMaxTotalPowerW', $event)" @blur="commitPolicyField('siteMaxTotalPowerW')" @keydown.enter.prevent="commitPolicyField('siteMaxTotalPowerW')" />
-          <small v-if="policyErrors.siteMaxTotalPowerW" class="input-error">{{ policyErrors.siteMaxTotalPowerW }}</small>
-        </label>
-        <label :class="{ invalid: policyErrors.siteMaxPhaseCurrentA }">
-          <span>Maximum phase current [A] · 0=OFF</span>
-          <input type="text" inputmode="decimal" :value="policyDraft.siteMaxPhaseCurrentA" @input="onPolicyDraftInput('siteMaxPhaseCurrentA', $event)" @blur="commitPolicyField('siteMaxPhaseCurrentA')" @keydown.enter.prevent="commitPolicyField('siteMaxPhaseCurrentA')" />
-          <small v-if="policyErrors.siteMaxPhaseCurrentA" class="input-error">{{ policyErrors.siteMaxPhaseCurrentA }}</small>
-        </label>
-      </div>
+        <div class="control-policy-grid two-columns">
+          <label :class="{ invalid: policyErrors.siteMaxTotalPowerW }">
+            <span>Maximum total power [W] · 0=OFF</span>
+            <input type="text" inputmode="decimal" :value="policyDraft.siteMaxTotalPowerW" @input="onPolicyDraftInput('siteMaxTotalPowerW', $event)" @blur="commitPolicyField('siteMaxTotalPowerW')" @keydown.enter.prevent="commitPolicyField('siteMaxTotalPowerW')" />
+            <small v-if="policyErrors.siteMaxTotalPowerW" class="input-error">{{ policyErrors.siteMaxTotalPowerW }}</small>
+          </label>
+          <label :class="{ invalid: policyErrors.siteMaxPhaseCurrentA }">
+            <span>Maximum phase current [A] · 0=OFF</span>
+            <input type="text" inputmode="decimal" :value="policyDraft.siteMaxPhaseCurrentA" @input="onPolicyDraftInput('siteMaxPhaseCurrentA', $event)" @blur="commitPolicyField('siteMaxPhaseCurrentA')" @keydown.enter.prevent="commitPolicyField('siteMaxPhaseCurrentA')" />
+            <small v-if="policyErrors.siteMaxPhaseCurrentA" class="input-error">{{ policyErrors.siteMaxPhaseCurrentA }}</small>
+          </label>
+        </div>
 
-      <div class="grid-derived">
-        <span>Measured total P: {{ measuredTotalPowerW !== null ? `${measuredTotalPowerW.toFixed(0)} W` : '--' }}</span>
-        <span>Headroom ratio: {{ siteHeadroomRatio !== null ? `${(siteHeadroomRatio * 100).toFixed(1)}%` : '--' }}</span>
+        <div class="grid-derived">
+          <span>Measured total P: {{ measuredTotalPowerW !== null ? `${measuredTotalPowerW.toFixed(0)} W` : '--' }}</span>
+          <span>Headroom ratio: {{ siteHeadroomRatio !== null ? `${(siteHeadroomRatio * 100).toFixed(1)}%` : '--' }}</span>
+        </div>
       </div>
     </div>
 
-    <div class="control-policy-panel">
+    <div class="control-policy-panel" :class="{ collapsed: !aiThresholdsOpen }">
       <div class="control-policy-head">
         <div>
-          <strong>AI Control Thresholds / Regler-Schwellen / AI 控制阈值</strong>
-          <p>Editable fields use "." as decimal separator and accept at most 2 decimal places. Invalid drafts never change the active controller value.</p>
+          <strong>AI Control Thresholds</strong>
+          <p v-if="aiThresholdsOpen">Editable fields use "." as decimal separator and accept at most 2 decimal places. Invalid drafts never change the active controller value.</p>
         </div>
-        <span class="grid-provenance">{{ _.controlPolicy.strategy.toUpperCase() }}</span>
+        <div class="control-policy-actions">
+          <span class="grid-provenance">{{ _.controlPolicy.strategy.toUpperCase() }}</span>
+          <button type="button" class="collapse-button" :aria-expanded="aiThresholdsOpen" @click="aiThresholdsOpen = !aiThresholdsOpen">
+            {{ aiThresholdsOpen ? 'HIDE' : 'SHOW' }}
+          </button>
+        </div>
       </div>
 
-      <div class="control-policy-grid">
-        <label :class="{ invalid: policyErrors.vufEnterPct }">
-          <span>VUF Enter [%]</span>
-          <input type="text" inputmode="decimal" :value="policyDraft.vufEnterPct" @input="onPolicyDraftInput('vufEnterPct', $event)" @blur="commitPolicyField('vufEnterPct')" @keydown.enter.prevent="commitPolicyField('vufEnterPct')" />
-          <small v-if="policyErrors.vufEnterPct" class="input-error">{{ policyErrors.vufEnterPct }}</small>
-        </label>
-        <label :class="{ invalid: policyErrors.vufExitPct }">
-          <span>VUF Exit [%]</span>
-          <input type="text" inputmode="decimal" :value="policyDraft.vufExitPct" @input="onPolicyDraftInput('vufExitPct', $event)" @blur="commitPolicyField('vufExitPct')" @keydown.enter.prevent="commitPolicyField('vufExitPct')" />
-          <small v-if="policyErrors.vufExitPct" class="input-error">{{ policyErrors.vufExitPct }}</small>
-        </label>
-        <label :class="{ invalid: policyErrors.batteryPredictedOnCurrentA }">
-          <span>Battery predicted ON current [A]</span>
-          <input type="text" inputmode="decimal" :value="policyDraft.batteryPredictedOnCurrentA" @input="onPolicyDraftInput('batteryPredictedOnCurrentA', $event)" @blur="commitPolicyField('batteryPredictedOnCurrentA')" @keydown.enter.prevent="commitPolicyField('batteryPredictedOnCurrentA')" />
-          <small v-if="policyErrors.batteryPredictedOnCurrentA" class="input-error">{{ policyErrors.batteryPredictedOnCurrentA }}</small>
-        </label>
-        <label :class="{ invalid: policyErrors.batteryEffectiveMinA }">
-          <span>Battery effective minimum [A]</span>
-          <input type="text" inputmode="decimal" :value="policyDraft.batteryEffectiveMinA" @input="onPolicyDraftInput('batteryEffectiveMinA', $event)" @blur="commitPolicyField('batteryEffectiveMinA')" @keydown.enter.prevent="commitPolicyField('batteryEffectiveMinA')" />
-          <small v-if="policyErrors.batteryEffectiveMinA" class="input-error">{{ policyErrors.batteryEffectiveMinA }}</small>
-        </label>
-      </div>
+      <div v-if="aiThresholdsOpen" class="control-policy-content">
+        <div class="control-policy-grid">
+          <label :class="{ invalid: policyErrors.vufEnterPct }">
+            <span>VUF Enter [%]</span>
+            <input type="text" inputmode="decimal" :value="policyDraft.vufEnterPct" @input="onPolicyDraftInput('vufEnterPct', $event)" @blur="commitPolicyField('vufEnterPct')" @keydown.enter.prevent="commitPolicyField('vufEnterPct')" />
+            <small v-if="policyErrors.vufEnterPct" class="input-error">{{ policyErrors.vufEnterPct }}</small>
+          </label>
+          <label :class="{ invalid: policyErrors.vufExitPct }">
+            <span>VUF Exit [%]</span>
+            <input type="text" inputmode="decimal" :value="policyDraft.vufExitPct" @input="onPolicyDraftInput('vufExitPct', $event)" @blur="commitPolicyField('vufExitPct')" @keydown.enter.prevent="commitPolicyField('vufExitPct')" />
+            <small v-if="policyErrors.vufExitPct" class="input-error">{{ policyErrors.vufExitPct }}</small>
+          </label>
+          <label :class="{ invalid: policyErrors.batteryPredictedOnCurrentA }">
+            <span>Battery predicted ON current [A]</span>
+            <input type="text" inputmode="decimal" :value="policyDraft.batteryPredictedOnCurrentA" @input="onPolicyDraftInput('batteryPredictedOnCurrentA', $event)" @blur="commitPolicyField('batteryPredictedOnCurrentA')" @keydown.enter.prevent="commitPolicyField('batteryPredictedOnCurrentA')" />
+            <small v-if="policyErrors.batteryPredictedOnCurrentA" class="input-error">{{ policyErrors.batteryPredictedOnCurrentA }}</small>
+          </label>
+          <label :class="{ invalid: policyErrors.batteryEffectiveMinA }">
+            <span>Battery effective minimum [A]</span>
+            <input type="text" inputmode="decimal" :value="policyDraft.batteryEffectiveMinA" @input="onPolicyDraftInput('batteryEffectiveMinA', $event)" @blur="commitPolicyField('batteryEffectiveMinA')" @keydown.enter.prevent="commitPolicyField('batteryEffectiveMinA')" />
+            <small v-if="policyErrors.batteryEffectiveMinA" class="input-error">{{ policyErrors.batteryEffectiveMinA }}</small>
+          </label>
+        </div>
 
-      <div class="grid-derived">
-        <span>Battery OFF→ON prediction: {{ Number(_.controlPolicy.batteryPredictedOnCurrentA).toFixed(2) }} A prototype</span>
-        <span>Battery measured ΔI: {{ batteryMeasuredCurrentA !== null ? `${batteryMeasuredCurrentA.toFixed(2)} A` : '--' }}</span>
-        <span>Internal headroom pre-limit: 90% · hard: 100%</span>
-        <span>Battery ramp: min 3 s · stable ΔI ≤0.02 A ×3 · max 10 s</span>
+        <div class="grid-derived">
+          <span>Battery OFF→ON prediction: {{ Number(_.controlPolicy.batteryPredictedOnCurrentA).toFixed(2) }} A prototype</span>
+          <span>Battery measured ΔI: {{ batteryMeasuredCurrentA !== null ? `${batteryMeasuredCurrentA.toFixed(2)} A` : '--' }}</span>
+          <span>Internal headroom pre-limit: 90% · hard: 100%</span>
+          <span>Battery ramp: min 3 s · stable ΔI ≤0.02 A ×3 · max 10 s</span>
+        </div>
       </div>
     </div>
 
@@ -1573,5 +1592,5 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.control-policy-panel{margin-top:12px;padding:12px;border:1px solid #284b60;border-radius:12px;background:#081721}.control-policy-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.control-policy-head strong{font-size:11px}.control-policy-head p{margin:4px 0 0;color:#789aac;font-size:9px;line-height:1.45}.control-policy-grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-top:10px}.control-policy-grid.two-columns{grid-template-columns:repeat(2,minmax(180px,1fr))}.control-policy-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.control-policy-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.control-policy-grid label.invalid input{border-color:#ff5c6c;box-shadow:0 0 0 1px rgba(255,92,108,.18)}.input-error{color:#ff8c97;font-size:8px;line-height:1.35}.control-reference-row span:first-child{border-color:#665c2d;color:#ffe795}@media(max-width:1100px){.control-policy-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}@media(max-width:700px){.control-policy-head{flex-direction:column}.control-policy-grid{grid-template-columns:1fr}}.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-impedance-panel.collapsed{padding-bottom:14px}.grid-panel-actions{display:flex;align-items:center;gap:8px}.collapse-button{padding:6px 10px;border:1px solid #284b60;border-radius:999px;background:#081721;color:#a7c8d8;cursor:pointer;font-size:9px;font-weight:700;letter-spacing:.08em}.collapse-button:hover{border-color:#58e7ff;color:#eaf6ff}.site-limits-panel{margin-top:12px}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-parameter-grid label.invalid input{border-color:#ff5c6c;box-shadow:0 0 0 1px rgba(255,92,108,.18)}.grid-input-note{margin:7px 0 0;color:#6f91a3;font-size:8px;line-height:1.4}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.electrical-profile-row{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-top:12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#081721}.electrical-profile-info{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#789aac;font-size:9px}.profile-badge,.voltage-guard{padding:5px 7px;border:1px solid #665c2d;border-radius:999px;color:#ffe795}.profile-badge.calibrated{border-color:#2b6f62;color:#8ff1c3}.profile-badge.running{border-color:#58e7ff;color:#58e7ff}.voltage-guard.safe{border-color:#2b6f62;color:#8ff1c3}.voltage-guard.unsafe{border-color:#6b3740;color:#ff8c97}.calibration-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.calibration-actions button{padding:7px 9px;border:1px solid #58e7ff;border-radius:8px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:9px;font-weight:700}.calibration-actions button.cancel{border-color:#6b3740;color:#ff9ba4}.calibration-actions button:disabled{cursor:not-allowed;opacity:.45}.calibration-actions small{max-width:420px;color:#6f91a3;font-size:8px}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.electrical-profile-row{flex-direction:column;align-items:flex-start}.calibration-actions{justify-content:flex-start}.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
+.control-policy-panel{margin-top:12px;padding:12px;border:1px solid #284b60;border-radius:12px;background:#081721}.control-policy-panel.collapsed{padding-bottom:12px}.control-policy-actions{display:flex;align-items:center;gap:8px}.control-policy-content{margin-top:0}.control-policy-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.control-policy-head strong{font-size:11px}.control-policy-head p{margin:4px 0 0;color:#789aac;font-size:9px;line-height:1.45}.control-policy-grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-top:10px}.control-policy-grid.two-columns{grid-template-columns:repeat(2,minmax(180px,1fr))}.control-policy-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.control-policy-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.control-policy-grid label.invalid input{border-color:#ff5c6c;box-shadow:0 0 0 1px rgba(255,92,108,.18)}.input-error{color:#ff8c97;font-size:8px;line-height:1.35}.control-reference-row span:first-child{border-color:#665c2d;color:#ffe795}@media(max-width:1100px){.control-policy-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}@media(max-width:700px){.control-policy-head{flex-direction:column}.control-policy-grid{grid-template-columns:1fr}}.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-impedance-panel.collapsed{padding-bottom:14px}.grid-panel-actions{display:flex;align-items:center;gap:8px}.collapse-button{padding:6px 10px;border:1px solid #284b60;border-radius:999px;background:#081721;color:#a7c8d8;cursor:pointer;font-size:9px;font-weight:700;letter-spacing:.08em}.collapse-button:hover{border-color:#58e7ff;color:#eaf6ff}.site-limits-panel{margin-top:12px}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-parameter-grid label.invalid input{border-color:#ff5c6c;box-shadow:0 0 0 1px rgba(255,92,108,.18)}.grid-input-note{margin:7px 0 0;color:#6f91a3;font-size:8px;line-height:1.4}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.electrical-profile-row{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-top:12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#081721}.electrical-profile-info{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#789aac;font-size:9px}.profile-badge,.voltage-guard{padding:5px 7px;border:1px solid #665c2d;border-radius:999px;color:#ffe795}.profile-badge.calibrated{border-color:#2b6f62;color:#8ff1c3}.profile-badge.running{border-color:#58e7ff;color:#58e7ff}.voltage-guard.safe{border-color:#2b6f62;color:#8ff1c3}.voltage-guard.unsafe{border-color:#6b3740;color:#ff8c97}.calibration-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.calibration-actions button{padding:7px 9px;border:1px solid #58e7ff;border-radius:8px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:9px;font-weight:700}.calibration-actions button.cancel{border-color:#6b3740;color:#ff9ba4}.calibration-actions button:disabled{cursor:not-allowed;opacity:.45}.calibration-actions small{max-width:420px;color:#6f91a3;font-size:8px}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.electrical-profile-row{flex-direction:column;align-items:flex-start}.calibration-actions{justify-content:flex-start}.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
 </style>

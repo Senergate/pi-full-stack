@@ -511,7 +511,7 @@ const agentStateDescription = computed(() => {
   if (agentState.value === 'pending') return 'A control command is waiting for physical execution feedback.';
   if (agentState.value === 'battery_ramping') return 'Battery is ON and ramping. Current-state VUF follows live Battery current/P+Q; normal optimization is paused unless a hard site limit is reached.';
   if (agentState.value === 'adjusting') return 'Execution confirmed. Waiting for the deterministic post-action settling window.';
-  return 'Battery-priority VUF control is monitoring raw model-estimated VUF. CUF/Schieflast control is intentionally deferred.';
+  return 'Battery-priority VUF control is monitoring raw model-estimated VUF. CUF/load-unbalance control is intentionally deferred.';
 });
 
 const predictCandidate = async state => {

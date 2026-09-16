@@ -11,8 +11,8 @@
  *   Wallbox mask1..3: 0.14, 0.30, 0.42 A
  *
  * Battery:
- *   Battery scaling/saturation reference maximum: 1.30 A.
- *   If the live measured battery current exceeds 1.30 A, the modeled building
+ *   Battery scaling/saturation reference maximum: 1.40 A.
+ *   If the live measured battery current exceeds 1.40 A, the modeled building
  *   current saturates at the existing configured maximum (40 A).
  */
 
