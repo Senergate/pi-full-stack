@@ -76,7 +76,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-a-real-current-live-twin';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-b-battery-priority-real-current-vuf-history-fix';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -112,7 +112,7 @@ const _ = reactive({
     calibration: { running: false, progress: { stage: 'idle', index: 0, total: 0, message: '' } },
   },
   agent: { enabled: false },
-  controlPolicy: cloneControlPolicyDefaults('current_v151'),
+  controlPolicy: cloneControlPolicyDefaults('battery_priority_v1'),
   mqtt: { connected: false, lastHeartbeatAt: null },
   startup: {
     phase: 'connecting',
@@ -396,9 +396,10 @@ const vufResult = computed(() => {
   });
 });
 
-// MODELED current display for Variant A.
-// The P/Q/VUF control model is intentionally unchanged; only the current bars
-// use the live measured-current scaling model requested for Variant A.
+// MODELED current display for Variant B.
+// Keep the Battery-Priority AI / P/Q / VUF control logic unchanged; only the
+// displayed Building-Twin current bars follow live Shelly currents scaled with
+// the user-confirmed real prototype current curves.
 const projectedCurrents = computed(() => {
   const state = currentDeviceStateForModel.value;
   return projectLiveScaledBuildingCurrents({
@@ -1361,6 +1362,10 @@ onUnmounted(() => {
         :control-ready="controlReady"
         :control-blocked-reason="controlBlockedReason"
         :command-feedback="commandFeedback"
+        :control-policy="_.controlPolicy"
+        :measured-currents="measuredCurrents"
+        :measured-total-power-w="measuredTotalPowerW"
+        :battery-measured-current-a="batteryMeasuredCurrentA"
         @apply-state="applyAgentDeviceState"
         @heatpump-zero-hold="requestHeatpumpZeroHold"
         @heatpump-stop="requestHeatpumpStop"

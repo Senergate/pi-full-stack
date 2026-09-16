@@ -10,7 +10,7 @@
         <span class="toggle-track"><span class="toggle-knob" /></span>
         <span>
           <strong>{{ autoEnabled ? 'AI CONTROL ON' : 'AI CONTROL OFF' }}</strong>
-          <small>{{ autoEnabled ? 'VUF-primary control · 207–253 V guard' : 'Operator control' }}</small>
+          <small>{{ autoEnabled ? 'Battery-priority VUF control · voltage/headroom guards' : 'Operator control' }}</small>
         </span>
       </button>
     </div>
@@ -24,9 +24,9 @@
         </div>
         <div class="vuf-value">
           <span>{{ formatVuf(vuf) }}</span>
-          <span v-if="agentState === 'adjusting' && prediction" class="vuf-prediction">({{ formatVuf(prediction.vuf) }})</span>
+          <span v-if="['pending','adjusting'].includes(agentState) && prediction" class="vuf-prediction">({{ formatVuf(prediction.vuf) }})</span>
         </div>
-        <div class="thresholds">Balanced &lt; 1% · Warning 1–2% · Critical &gt; 2%</div>
+        <div class="thresholds">Control enter {{ vufEnterPct.toFixed(1) }}% · release {{ vufExitPct.toFixed(1) }}% · Battery effective ≥ {{ batteryEffectiveMinA.toFixed(2) }} A</div>
       </div>
 
       <div class="panel">
@@ -163,12 +163,10 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { classifyVuf, formatVufPercent, roundVufForDisplay } from '../VufPresentation.js';
+import { classifyVuf, formatVufPercent } from '../VufPresentation.js';
+import { CONTROL_POLICY_DEFAULTS, PROTOTYPE_CURRENT_CURVES_A } from '../ControlPolicyConfig.js';
 
-const CRITICAL_VUF = 2.0;
-const SETTLE_TIME_MS = 5000;
 const TICK_MS = 250;
-const MIN_IMPROVEMENT = 0.01;
 const MAX_HEATPUMP = 5;
 const MAX_WALLBOX = 3;
 const MIN_LOAD_RATIO = 0.5;
@@ -180,6 +178,10 @@ const props = defineProps({
   controlReady: { type: Boolean, required: false, default: true },
   controlBlockedReason: { type: String, required: false, default: '' },
   commandFeedback: { type: Object, required: false, default: () => ({}) },
+  controlPolicy: { type: Object, required: false, default: () => ({}) },
+  measuredCurrents: { type: Object, required: false, default: () => ({ a: null, b: null, c: null }) },
+  measuredTotalPowerW: { type: Number, required: false, default: null },
+  batteryMeasuredCurrentA: { type: Number, required: false, default: null },
 });
 
 const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold', 'heatpump-stop']);
@@ -227,6 +229,41 @@ const hasPendingDevice = computed(() => pendingDevices.heatpump || pendingDevice
 const hasUnknownDeviceState = computed(() => Object.values(normalizedDeviceStates.value).some(value => value === null));
 const nextBatteryCommand = computed(() => normalizedDeviceStates.value.batteryCharging !== true);
 const manualControlDisabled = computed(() => autoEnabled.value || !props.controlReady);
+
+const policyNumber = (key, fallback) => {
+  const value = Number(props.controlPolicy?.[key]);
+  return Number.isFinite(value) ? value : fallback;
+};
+const vufEnterPct = computed(() => policyNumber('vufEnterPct', CONTROL_POLICY_DEFAULTS.vufEnterPct));
+const vufExitPct = computed(() => Math.min(vufEnterPct.value, policyNumber('vufExitPct', CONTROL_POLICY_DEFAULTS.vufExitPct)));
+const batteryEffectiveMinA = computed(() => policyNumber('batteryEffectiveMinA', CONTROL_POLICY_DEFAULTS.batteryEffectiveMinA));
+const preLimitRatio = computed(() => policyNumber('preLimitRatio', CONTROL_POLICY_DEFAULTS.preLimitRatio));
+const hardRatio = computed(() => policyNumber('hardRatio', CONTROL_POLICY_DEFAULTS.hardRatio));
+const minImprovement = computed(() => policyNumber('minVufImprovementPct', CONTROL_POLICY_DEFAULTS.minVufImprovementPct));
+
+const headroomRatio = computed(() => {
+  const ratios = [];
+  const pMax = policyNumber('siteMaxTotalPowerW', 0);
+  if (pMax > 0 && Number.isFinite(props.measuredTotalPowerW)) ratios.push(props.measuredTotalPowerW / pMax);
+  const iMax = policyNumber('siteMaxPhaseCurrentA', 0);
+  if (iMax > 0) {
+    for (const value of Object.values(props.measuredCurrents ?? {})) {
+      const current = Number(value);
+      if (Number.isFinite(current)) ratios.push(current / iMax);
+    }
+  }
+  return ratios.length > 0 ? Math.max(...ratios) : null;
+});
+const siteLimitGuardEnabled = computed(() => headroomRatio.value !== null);
+const batteryEffective = computed(() => {
+  if (normalizedDeviceStates.value.batteryCharging !== true) return true;
+  const current = Number(props.batteryMeasuredCurrentA);
+  return !Number.isFinite(current) || current >= batteryEffectiveMinA.value;
+});
+
+const awaitingAiExecution = ref(false);
+const aiActionDevice = ref(null);
+const imbalanceLatched = ref(false);
 
 /*
  * Device segments show either the last ESP32-confirmed state or an outstanding
@@ -301,13 +338,32 @@ watch([normalizedDeviceStates, normalizedHeatpumpMode], ([current, heatpumpMode]
   }
 }, { deep: true });
 
+watch(hasPendingDevice, (pending, previous) => {
+  if (!autoEnabled.value || !awaitingAiExecution.value) return;
+  if (previous === true && pending === false) {
+    awaitingAiExecution.value = false;
+    agentState.value = 'adjusting';
+    cooldownUntil.value = Date.now() + activeSettleMs.value;
+    addLog('Execution confirmed · settling', `${aiActionDevice.value ?? 'device'} confirmed. Waiting ${(activeSettleMs.value / 1000).toFixed(1)} s before the next control decision.`, 'monitoring');
+  }
+});
+
 const conditionForVuf = value => classifyVuf(value);
 
 const condition = computed(() => conditionForVuf(props.vuf));
 const vuf = computed(() => props.vuf);
 
 const cooldownRemaining = computed(() => Math.max(0, (cooldownUntil.value - now.value) / 1000));
-const cooldownProgress = computed(() => 100 - Math.min(100, (cooldownRemaining.value / (SETTLE_TIME_MS / 1000)) * 100));
+const activeSettleMs = computed(() => {
+  if (aiActionDevice.value === 'heatpump') return policyNumber('heatpumpSettleMs', CONTROL_POLICY_DEFAULTS.heatpumpSettleMs);
+  if (aiActionDevice.value === 'wallbox') return policyNumber('wallboxSettleMs', CONTROL_POLICY_DEFAULTS.wallboxSettleMs);
+  if (aiActionDevice.value === 'batteryCharging') return policyNumber('batterySettleMs', CONTROL_POLICY_DEFAULTS.batterySettleMs);
+  return CONTROL_POLICY_DEFAULTS.heatpumpSettleMs;
+});
+const cooldownProgress = computed(() => {
+  const seconds = Math.max(0.001, activeSettleMs.value / 1000);
+  return 100 - Math.min(100, (cooldownRemaining.value / seconds) * 100);
+});
 
 const formatVuf = value => formatVufPercent(value);
 
@@ -328,8 +384,9 @@ const addLog = async (title, message, type = 'info') => {
 const agentStateDescription = computed(() => {
   if (!autoEnabled.value) return 'Automatic control is disabled.';
   if (agentState.value === 'blocked') return props.controlBlockedReason || 'Automatic control is blocked by hardware/data gate.';
-  if (agentState.value === 'adjusting') return 'A VUF-reducing adjustment passed the 207–253 V prediction guard. Waiting for the physical system to settle.';
-  return 'Automatic control is monitoring total model-estimated VUF. VUF remains the primary optimization KPI.';
+  if (agentState.value === 'pending') return 'A control command is waiting for physical execution feedback.';
+  if (agentState.value === 'adjusting') return 'Execution confirmed. Waiting for the configured post-action settling window.';
+  return 'Battery-priority VUF control is monitoring raw model-estimated VUF. CUF/Schieflast control is intentionally deferred.';
 });
 
 const predictCandidate = async state => {
@@ -379,6 +436,44 @@ const getCompensationCandidates = current => {
   return candidates;
 };
 
+
+const actionDelta = (current, candidate) => {
+  const keys = ['heatpump', 'wallbox', 'batteryCharging'];
+  const changed = keys.filter(key => candidate[key] !== current[key]);
+  return changed.length === 1 ? changed[0] : null;
+};
+
+const prototypeCurrentFor = (key, value) => {
+  if (key === 'heatpump') return PROTOTYPE_CURRENT_CURVES_A.heatpump[value] ?? 0;
+  if (key === 'wallbox') return PROTOTYPE_CURRENT_CURVES_A.wallbox[value] ?? 0;
+  if (key === 'batteryCharging') {
+    if (!value) return 0;
+    const current = Number(props.batteryMeasuredCurrentA);
+    return Number.isFinite(current) ? Math.max(0, current) : 0;
+  }
+  return 0;
+};
+
+const prototypeReliefA = (current, candidate) => {
+  let relief = 0;
+  for (const key of ['heatpump', 'wallbox', 'batteryCharging']) {
+    relief += prototypeCurrentFor(key, current[key]) - prototypeCurrentFor(key, candidate[key]);
+  }
+  return relief;
+};
+
+const dedupeStates = candidates => {
+  const unique = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = JSON.stringify(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(candidate);
+  }
+  return unique;
+};
+
 const evaluateCandidates = async candidates => {
   const results = [];
   for (const candidate of candidates) {
@@ -401,27 +496,66 @@ const evaluateCandidates = async candidates => {
 const chooseNextAction = async () => {
   if (hasUnknownDeviceState.value) return null;
   const current = { ...normalizedDeviceStates.value };
+  const currentVuf = Number(props.vuf);
+  if (!Number.isFinite(currentVuf)) return null;
 
-  // Compare every permitted one-step transition in one search space. This
-  // avoids the old reduction-first greedy behaviour and lets Branch B win
-  // when adding an equivalent wallbox improves VUF more than trimming Branch A.
-  const candidates = [
-    ...getReductionCandidates(current),
-    ...getCompensationCandidates(current),
-  ];
+  const evaluateBest = async candidates => {
+    const best = await evaluateCandidates(dedupeStates(candidates));
+    if (!best || best.vuf >= currentVuf - minImprovement.value) return null;
+    return best;
+  };
 
-  const unique = [];
-  const seen = new Set();
-  for (const candidate of candidates) {
-    const key = JSON.stringify(candidate);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(candidate);
+  // 1) Hard/pre-limit protection has precedence over balancing preference.
+  //    If Battery is already ON and site headroom approaches the configured
+  //    limit, first derate Heatpump or Wallbox by one permitted step.
+  if (siteLimitGuardEnabled.value && normalizedDeviceStates.value.batteryCharging === true && headroomRatio.value >= preLimitRatio.value) {
+    const derating = getReductionCandidates(current).filter(candidate => {
+      const key = actionDelta(current, candidate);
+      return key === 'heatpump' || key === 'wallbox';
+    });
+    const evaluated = [];
+    for (const candidate of derating) {
+      const result = await predictCandidate(candidate);
+      if (result?.voltageSafe) evaluated.push({ ...result, reliefA: prototypeReliefA(current, candidate) });
+    }
+    if (evaluated.length > 0) {
+      // Primary in headroom mode: release as much prototype current as possible;
+      // VUF is the tie-breaker. This uses the measured A/B current curves.
+      evaluated.sort((a, b) => (b.reliefA - a.reliefA) || (a.vuf - b.vuf));
+      return { ...evaluated[0], reason: 'headroom_derating' };
+    }
+
+    // No HP/WB derating exists. At/above the hard threshold Battery OFF becomes
+    // a last-resort load-reduction action; below hard threshold keep monitoring.
+    if (headroomRatio.value >= hardRatio.value && current.batteryCharging) {
+      const off = await predictCandidate({ ...current, batteryCharging: false });
+      if (off?.voltageSafe) return { ...off, reason: 'hard_limit_battery_off' };
+    }
   }
 
-  const best = await evaluateCandidates(unique);
-  if (!best || best.vuf >= Number(props.vuf) - MIN_IMPROVEMENT) return null;
-  return { ...best, reason: 'optimize' };
+  // 2) Battery-first balancing: when Battery is OFF and the site is not already
+  //    close to a configured headroom limit, try exactly this action first.
+  if (!current.batteryCharging && (!siteLimitGuardEnabled.value || headroomRatio.value < preLimitRatio.value)) {
+    const batteryCandidate = await predictCandidate({ ...current, batteryCharging: true });
+    if (batteryCandidate?.voltageSafe && batteryCandidate.vuf < currentVuf - minImprovement.value) {
+      return { ...batteryCandidate, reason: 'battery_priority' };
+    }
+  }
+
+  // 3) If the Battery is ON but has tapered below the configured effective
+  //    current, do not treat it as a useful balancing actuator. Choose among
+  //    the remaining one-step Heatpump/Wallbox actions.
+  const allCandidates = [
+    ...getReductionCandidates(current),
+    ...getCompensationCandidates(current),
+  ].filter(candidate => {
+    const key = actionDelta(current, candidate);
+    if (!batteryEffective.value && key === 'batteryCharging') return false;
+    return true;
+  });
+
+  const best = await evaluateBest(allCandidates);
+  return best ? { ...best, reason: batteryEffective.value ? 'optimize_after_battery' : 'battery_ineffective_fallback' } : null;
 };
 
 const selectAndApplyState = async repeatedViolation => {
@@ -434,7 +568,7 @@ const selectAndApplyState = async repeatedViolation => {
 
   evaluating.value = true;
   try {
-    addLog(repeatedViolation ? 'VUF still violated' : 'VUF violation detected', `Estimated VUF is ${formatVuf(props.vuf)}.`, 'critical');
+    addLog(repeatedViolation ? 'VUF still violated' : 'VUF violation detected', `Raw estimated VUF is ${Number(props.vuf).toFixed(3)}%.`, 'critical');
     const action = await chooseNextAction();
     if (!autoEnabled.value) return;
     if (!action) {
@@ -452,14 +586,16 @@ const selectAndApplyState = async repeatedViolation => {
     }
     if (Object.keys(patch).length === 0) return;
     markPending(patch, { heatpumpMode: Object.hasOwn(patch, 'heatpump') ? (patch.heatpump === 0 ? 'zero_hold' : 'start') : null });
+    aiActionDevice.value = Object.keys(patch)[0] ?? null;
+    awaitingAiExecution.value = true;
     emit('apply-state', patch);
     addLog(
-      'Best one-step balancing action selected',
+      action.reason === 'battery_priority' ? 'Battery-priority action selected' : action.reason === 'headroom_derating' ? 'Headroom derating selected' : 'Best one-step balancing action selected',
       [`Heat pump ${action.state.heatpump}/5`, `Wallbox ${action.state.wallbox}/3`, `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`, `Predicted VUF ${formatVuf(action.vuf)}`, 'Voltage guard 207–253 V: OK'].join(' · '),
       'action'
     );
-    agentState.value = 'adjusting';
-    cooldownUntil.value = Date.now() + SETTLE_TIME_MS;
+    agentState.value = 'pending';
+    cooldownUntil.value = 0;
   } finally {
     evaluating.value = false;
   }
@@ -473,11 +609,8 @@ const evaluateAgent = async () => {
     prediction.value = null;
     return;
   }
-  // Do not let enabling AI replace a command that is still waiting for
-  // execution feedback. The pending target remains visible across the toggle.
   if (hasPendingDevice.value) {
-    agentState.value = 'monitoring';
-    prediction.value = null;
+    agentState.value = 'pending';
     return;
   }
   if (props.vuf === null || props.vuf === undefined || props.vuf === '' || hasUnknownDeviceState.value) {
@@ -486,20 +619,23 @@ const evaluateAgent = async () => {
     return;
   }
 
-  const currentVuf = roundVufForDisplay(props.vuf);
-  if (currentVuf === null || !Number.isFinite(currentVuf)) return;
+  const rawVuf = Number(props.vuf);
+  if (!Number.isFinite(rawVuf)) return;
+
+  if (rawVuf > vufEnterPct.value) imbalanceLatched.value = true;
+  else if (rawVuf < vufExitPct.value) imbalanceLatched.value = false;
 
   if (agentState.value === 'adjusting') {
     if (now.value < cooldownUntil.value) return;
-    if (currentVuf > CRITICAL_VUF) { await selectAndApplyState(true); return; }
+    if (imbalanceLatched.value) { await selectAndApplyState(true); return; }
     prediction.value = null;
     agentState.value = 'monitoring';
-    addLog('VUF stabilized', `Estimated VUF is now ${formatVuf(currentVuf)}.`, 'success');
+    addLog('VUF stabilized', `Raw estimated VUF ${rawVuf.toFixed(3)}% is below the release threshold ${vufExitPct.value.toFixed(2)}%.`, 'success');
     return;
   }
 
   agentState.value = 'monitoring';
-  if (currentVuf > CRITICAL_VUF) await selectAndApplyState(false);
+  if (imbalanceLatched.value) await selectAndApplyState(false);
 };
 
 const toggleAuto = () => {
@@ -584,5 +720,5 @@ onUnmounted(() => { if (timer.value) window.clearInterval(timer.value); });
 </script>
 
 <style scoped>
-.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.log-dot.critical{background:var(--red)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
+.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.log-dot.critical{background:var(--red)}.dot.pending{background:#ffd166;box-shadow:0 0 12px rgba(255,209,102,.45)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
 </style>

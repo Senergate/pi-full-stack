@@ -1,0 +1,14 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const agent = fs.readFileSync(new URL('../client/src/components/AgentCard.vue', import.meta.url), 'utf8');
+const config = fs.readFileSync(new URL('../client/src/ControlPolicyConfig.js', import.meta.url), 'utf8');
+assert.match(config, /batteryEffectiveMinA:\s*0\.10/);
+assert.match(agent, /reason:\s*'battery_priority'/);
+assert.match(agent, /reason:\s*'headroom_derating'/);
+assert.match(agent, /prototypeReliefA/);
+assert.match(agent, /watch\(hasPendingDevice/);
+assert.match(agent, /cooldownUntil\.value = Date\.now\(\) \+ activeSettleMs\.value/);
+assert.match(agent, /rawVuf > vufEnterPct\.value/);
+assert.match(agent, /rawVuf < vufExitPct\.value/);
+assert.doesNotMatch(agent, /CUF.*primary|Schieflast.*primary/);
+console.log('battery_priority_control_static_test: OK');

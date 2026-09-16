@@ -54,9 +54,8 @@ export const CONTROL_POLICY_DEFAULTS = Object.freeze({
 });
 
 // Real prototype current measurements supplied on 2026-09-15 (±0.01 A).
-// Variant A uses these points as the real-current curve anchors for the
-// live-scaled BUILDING TWIN current display. Variant B may also use them for
-// action-relief ranking. They do not replace calibrated P/Q profiles.
+// These are used only for action-relief ranking in the recommended controller;
+// they do not replace calibrated P/Q profiles.
 export const PROTOTYPE_CURRENT_CURVES_A = Object.freeze({
   heatpump: Object.freeze({ 0: 0.00, 1: 0.09, 2: 0.16, 3: 0.21, 4: 0.24, 5: 0.26 }),
   wallbox: Object.freeze({ 0: 0.00, 1: 0.14, 2: 0.30, 3: 0.42 }),
