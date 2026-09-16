@@ -1,5 +1,5 @@
 /*
- * Senergate Variant A - live current display model
+ * Senergate live current display model
  * -------------------------------------------------
  * Purpose:
  *   Keep the existing v1.5.1 P/Q -> feeder -> VUF control behaviour unchanged,
@@ -11,18 +11,18 @@
  *   Wallbox mask1..3: 0.14, 0.30, 0.42 A
  *
  * Battery:
- *   First-pass predicted low-SOC maximum: 1.30 A.
+ *   Battery scaling/saturation reference maximum: 1.30 A.
  *   If the live measured battery current exceeds 1.30 A, the modeled building
  *   current saturates at the existing configured maximum (40 A).
  */
 
 import { BUILDING_TWIN_CONFIG } from './BuildingTwinModel.js';
-import { PROTOTYPE_CURRENT_CURVES_A } from './ControlPolicyConfig.js';
+import { BATTERY_CONTROL_INTERNALS, PROTOTYPE_CURRENT_CURVES_A } from './ControlPolicyConfig.js';
 
 export const PROTOTYPE_CURRENT_REFERENCE_MAX_A = Object.freeze({
   heatpump: 0.26,
   wallbox: 0.42,
-  battery: 1.30,
+  battery: BATTERY_CONTROL_INTERNALS.referenceMaxA,
 });
 
 const finiteOrNull = value => {

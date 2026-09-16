@@ -1,0 +1,26 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const agent = fs.readFileSync(new URL('../client/src/components/AgentCard.vue', import.meta.url), 'utf8');
+const dash = fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue', import.meta.url), 'utf8');
+const cfg = fs.readFileSync(new URL('../client/src/ControlPolicyConfig.js', import.meta.url), 'utf8');
+
+assert.match(cfg, /batteryPredictedOnCurrentA:\s*1\.04/);
+assert.match(cfg, /batteryMinSettleMs:\s*3000/);
+assert.match(cfg, /batteryStableDeltaA:\s*0\.02/);
+assert.match(cfg, /batteryStableSamples:\s*3/);
+assert.match(cfg, /batteryMaxSettleMs:\s*10000/);
+assert.match(agent, /agentState\.value = 'battery_ramping'/);
+assert.match(agent, /props\.batteryMeasurementToken/);
+assert.match(agent, /delta <= BATTERY_CONTROL_INTERNALS\.batteryStableDeltaA/);
+assert.match(agent, /headroomRatio\.value >= hardRatio\.value/);
+assert.match(agent, /fromBatteryRampHardOverride/);
+assert.match(dash, /batteryPredictedOnCurrentA/);
+assert.match(dash, /preferMeasuredPq:\s*batteryCharging\.value === true/);
+assert.match(dash, /live_shelly_delta_pq_scaled_to_building_saturated/);
+assert.match(dash, /gridImpedanceOpen/);
+assert.match(dash, /window\.localStorage/);
+assert.match(dash, /Hiding this panel changes only the UI/);
+assert.match(dash, /Invalid drafts never change the active controller value/);
+assert.doesNotMatch(dash, />Warning ratio</);
+assert.doesNotMatch(dash, />Critical ratio</);
+console.log('battery_ramping_control_static_test: PASS');
