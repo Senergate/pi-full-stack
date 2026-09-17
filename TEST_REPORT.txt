@@ -1,84 +1,31 @@
-agent_candidate_strategy_static_test: PASS
-agent_manual_patch_static_test: PASS
-agent_voltage_guard_static_test: PASS
-battery_dynamic_power_model_test: PASS
-battery_priority_control_static_test: OK
-battery_ramping_control_static_test: PASS
-branchA_command_status_race_test: PASS
-branchA_correlation_static_test: PASS
-branchA_immediate_twin_projection_test: PASS
-branchA_status_adapter_static_test: PASS
-branchA_status_target_projection_test: PASS
-branchb_shelly_readiness_static_test: PASS
-bugfix3 smoke tests: PASS
-balanced CUF = 1.8008594705238022e-14
-missing-current CUF = null
-missing-input VUF = null
-battery: charging=true -> on, charging=false -> off
-building_twin_model_test: PASS
-collapsible_english_ui_ref140_static_test: PASS
-control_policy_validation_test: PASS
-control_regression_restore_static_test: PASS
-current_card_measured_modeled_static_test: PASS
-electrical_calibration_service_static_test: PASS
-equivalent_device_no_gain_static_test: PASS
-frontend_build_version_static_test: PASS
-grid_input_validation_test: PASS
-heatpump-> {
-  command: { mode: 'stop', level: 0, target_hz: 0 },
-  accepted: true,
-  mode: 'stop',
-  level: 0,
-  target_hz: 0,
-  payload: 'stop,0'
-}
-heatpump-> {
-  command: { mode: 'zero_hold', level: 0, target_hz: 0 },
-  accepted: true,
-  mode: 'zero_hold',
-  level: 0,
-  target_hz: 0,
-  payload: 'start,0'
-}
-heatpump-> {
-  command: { mode: 'start', level: 3, target_hz: 30 },
-  accepted: true,
-  mode: 'start',
-  level: 3,
-  target_hz: 30,
-  payload: 'start,30'
-}
-heatpump-> {
-  command: { mode: 'start', level: 5, target_hz: 50 },
-  accepted: true,
-  mode: 'start',
-  level: 5,
-  target_hz: 50,
-  payload: 'start,50'
-}
-heatpump rejected -> {
-  accepted: false,
-  reason: 'legacy_normalized_load_rejected',
-  message: 'Use { mode, level, target_hz }. Numeric 0..1 load is forbidden in execution path.'
-}
-heatpump_command_contract_test: PASS
-incremental_pcc_model_static_test: PASS
-p03_branchA_semantics_restore_test: PASS
-pending_timeout_static_test: PASS
-pi5_heartbeat_static_test: PASS
-pq_profile_model_test: PASS
-prototype_current_live_twin_static_test: PASS
-prototype_current_live_twin_test: PASS
-real_hardware_vuf_demo_test: PASS
-severe WB-only VUF=2.620%, voltages={"a":230.60983975891605,"b":210.9368929528233,"c":231.37735624589166}
-all-max VUF=0.290%
-real_only_frontend_static_test: PASS
-recheck_preserve_state_static_test: PASS
-startup_display_null_gate_static_test: PASS
-startup_initialization_static_test: PASS
-static_heatpump_no_legacy_path_test: PASS
-vue_import_usage_static_test: PASS
-PASS vuf_history_hold_static_test
-vuf_presentation_consistency_test: PASS
-TEST_COUNT=39
-TEST_FAIL=0
+Senergate v1.5.1 AI CONTROL C — TEST REPORT
+
+Automated Node/static/model tests: 35 PASS / 0 FAIL
+JavaScript syntax checks:
+- client/src/ControlPolicyConfig.js: PASS
+- client/src/CapacitySupervisor.js: PASS
+- extracted <script setup> from SimpleDashboard.vue: PASS
+- extracted <script setup> from AgentCard.vue: PASS
+- extracted <script setup> from VufCard.vue: PASS
+
+New tests include:
+- capacity/adjustability static contract
+- capacity formula static contract
+- CapacitySupervisor behavioral checks
+- Wallbox break-before-make sequencing
+
+Not executed in this environment:
+- Full Vite production build. npm dependency installation could not be completed in the execution environment.
+- Real-hardware HIL/bench validation.
+
+Required bench checks before field use:
+1. Capacity limit 0 => no Capacity guard intervention.
+2. Configure P/L1/L2/L3 limits and verify limiting constraint selection.
+3. Verify 80/90/95/100 state transitions.
+4. Heatpump adjustability mapping at 20/21/40/41/60/61/80/81/99/100.
+5. Wallbox mapping at 30/31/90/91/100.
+6. Wallbox Level 2 -> Level 1: OFF old relay before ON new relay.
+7. Battery ON + PRE-LIMIT + HP/WB floor => Battery release.
+8. HP/WB floor + Battery cannot exit VUF critical => CRITICAL_UNRESOLVED + 1 s VUF blink.
+9. Any state change / threshold change from CRITICAL_UNRESOLVED triggers reevaluation.
+10. Branch-A STOP/SAFE_MODE/FAULT behavior remains unchanged.

@@ -55,10 +55,8 @@ export const DEFAULT_ELECTRICAL_PROFILES = Object.freeze({
       target_current_a: BUILDING_TARGETS.wallboxMaxCurrentA,
       points: {
         0: { fraction: 0.00, pf: 1.000 },
-        // User-measured prototype current curve: 0.14 / 0.30 / 0.42 A.
-        // Keep mask 1 and mask 2 electrically distinct in the fallback P/Q model.
-        1: { fraction: 0.333333, pf: 0.995 },
-        2: { fraction: 0.714286, pf: 0.995 },
+        1: { fraction: 0.50, pf: 0.995 },
+        2: { fraction: 0.50, pf: 0.995 },
         3: { fraction: 1.00, pf: 0.995 },
       },
     },

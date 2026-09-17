@@ -1,0 +1,13 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const text = fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue', import.meta.url), 'utf8');
+const start = text.indexOf('const relayOps = []');
+assert.ok(start >= 0, 'Expected relay operation sequencing.');
+const section = text.slice(start, text.indexOf("if (own(state, 'batteryCharging'))", start));
+const offR0 = section.indexOf('relayOps.push([0, false])');
+const offR1 = section.indexOf('relayOps.push([1, false])');
+const onR0 = section.indexOf('relayOps.push([0, true])');
+const onR1 = section.indexOf('relayOps.push([1, true])');
+assert.ok(offR0 >= 0 && offR1 >= 0 && onR0 >= 0 && onR1 >= 0);
+assert.ok(offR0 < onR0 && offR1 < onR1, 'OFF operations must be defined before ON operations.');
+console.log('wallbox_break_before_make_static_test: OK');

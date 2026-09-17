@@ -9,11 +9,11 @@ if (!dashboard.includes('measurementFresh.value && branchAReady.value && _.elect
 if (dashboard.includes("_.startup.phase === 'ready' && measurementFresh.value && branchAReady.value && branchBReady.value")) {
   throw new Error('Branch B/startup must not globally block all device controls.');
 }
-if (!dashboard.includes('if (_.wallbox.r0 !== targetR0) runtime.WallboxService.set(0, targetR0)')) {
-  throw new Error('Wallbox command must preserve confirmed state and only command changed relay 0.');
+if (!dashboard.includes('const relayOps = []') || !dashboard.includes('for (const [relay, on] of relayOps) runtime.WallboxService.set(relay, on)')) {
+  throw new Error('Wallbox command must preserve confirmed state and sequence only required relay operations.');
 }
-if (!dashboard.includes('if (_.wallbox.r1 !== targetR1) runtime.WallboxService.set(1, targetR1)')) {
-  throw new Error('Wallbox command must preserve confirmed state and only command changed relay 1.');
+if (!dashboard.includes('relayOps.push([0, false])') || !dashboard.includes('relayOps.push([1, false])') || !dashboard.includes('relayOps.push([0, true])') || !dashboard.includes('relayOps.push([1, true])')) {
+  throw new Error('Wallbox command must use break-before-make OFF-before-ON sequencing for cross-mask transitions.');
 }
 if (!model.includes('baseCurrentA: Object.freeze({ a: 0, b: 0, c: 0 })')) {
   throw new Error('Artificial non-zero building base current must be removed.');

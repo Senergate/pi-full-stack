@@ -14,7 +14,7 @@
     <div class="measured-strip">
       <div class="measured-copy">
         <strong>SHELLY · MEASURED</strong>
-        <small>physical prototype current</small>
+        <small>physical prototype current / 原型实测电流</small>
       </div>
       <div
         v-for="phase in measuredPhases"

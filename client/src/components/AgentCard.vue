@@ -22,11 +22,12 @@
           <span class="dot" :class="condition.className" />
           <strong :class="condition.className">{{ condition.label }}</strong>
         </div>
-        <div class="vuf-value">
+        <div class="vuf-value" :class="{ 'critical-unresolved-blink': agentState === 'critical_unresolved' }">
           <span>{{ formatVuf(vuf) }}</span>
-          <span v-if="['pending','adjusting','battery_ramping'].includes(agentState) && prediction" class="vuf-prediction">({{ formatVuf(prediction.vuf) }})</span>
+          <span v-if="['pending','adjusting'].includes(agentState) && prediction" class="vuf-prediction">({{ formatVuf(prediction.vuf) }})</span>
         </div>
-        <div class="thresholds">Control enter {{ vufEnterPct.toFixed(2) }}% · release {{ vufExitPct.toFixed(2) }}% · Battery predicted ON {{ batteryPredictedOnCurrentA.toFixed(2) }} A · effective ≥ {{ batteryEffectiveMinA.toFixed(2) }} A</div>
+        <div class="thresholds">Control enter {{ vufEnterPct.toFixed(1) }}% · release {{ vufExitPct.toFixed(1) }}% · Battery effective ≥ {{ batteryEffectiveMinA.toFixed(2) }} A</div>
+        <div class="thresholds">HP min {{ heatpumpLocked ? 'LOCKED' : `L${heatpumpMinAllowedLevel}` }} · WB min {{ wallboxLocked ? 'LOCKED' : `L${wallboxMinAllowedLevel}` }} · Capacity {{ headroomRatio !== null ? `${(headroomRatio * 100).toFixed(1)}%` : 'OFF' }}</div>
       </div>
 
       <div class="panel">
@@ -50,21 +51,6 @@
             <div class="cooldown-fill" :style="{ width: `${cooldownProgress}%` }" />
           </div>
         </div>
-
-        <div v-if="agentState === 'battery_ramping'" class="cooldown">
-          <div class="cooldown-label">
-            <span>Battery stabilization</span>
-            <strong>{{ batteryRampElapsedS.toFixed(1) }} / {{ (BATTERY_CONTROL_INTERNALS.batteryMaxSettleMs / 1000).toFixed(1) }} s</strong>
-          </div>
-          <div class="cooldown-track">
-            <div class="cooldown-fill" :style="{ width: `${batteryRampProgress}%` }" />
-          </div>
-          <div class="feedback-lines">
-            <span>Current {{ Number.isFinite(Number(batteryMeasuredCurrentA)) ? `${Number(batteryMeasuredCurrentA).toFixed(2)} A` : '--' }}</span>
-            <span>Stable updates {{ batteryRamp.stableCount }}/{{ BATTERY_CONTROL_INTERNALS.batteryStableSamples }} · stable window {{ (batteryRamp.stableDurationMs / 1000).toFixed(1) }} s</span>
-            <span>Slope {{ Number.isFinite(batteryRamp.slopeAperS) ? `${batteryRamp.slopeAperS.toFixed(3)} A/s` : '--' }} · limit ≤ {{ BATTERY_CONTROL_INTERNALS.batteryStableSlopeAperS.toFixed(2) }} A/s</span>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -76,7 +62,6 @@
       <div class="decision-badges">
         <span v-if="prediction" class="badge">PREDICTED</span>
         <span v-if="hasPendingDevice" class="badge pending-badge">COMMAND PENDING</span>
-        <span v-if="agentState === 'battery_ramping'" class="badge pending-badge">BATTERY RAMPING</span>
       </div>
     </div>
 
@@ -142,7 +127,6 @@
 
         <small v-if="pendingDevices.batteryCharging" class="pending-note">pending → {{ pendingTargetState.batteryCharging ? 'ON' : 'OFF' }}</small>
         <small v-else-if="normalizedDeviceStates.batteryCharging === null" class="pending-note">waiting for battery status</small>
-        <small v-if="normalizedDeviceStates.batteryCharging === true" class="pending-note">stabilization confidence: {{ batteryStabilizationConfidence.toUpperCase() }}</small>
 
         <button
           type="button"
@@ -181,13 +165,12 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { classifyVuf, formatVufPercent } from '../VufPresentation.js';
-import { BATTERY_CONTROL_INTERNALS, CONTROL_POLICY_DEFAULTS, PROTOTYPE_CURRENT_CURVES_A } from '../ControlPolicyConfig.js';
-import { updateBatteryStabilizationWindow } from '../BatteryStabilizationModel.js';
+import { CONTROL_POLICY_DEFAULTS, PROTOTYPE_CURRENT_CURVES_A } from '../ControlPolicyConfig.js';
+import { heatpumpAdjustabilityRule, phaseCurrentLimitA, wallboxAdjustabilityRule } from '../CapacitySupervisor.js';
 
 const TICK_MS = 250;
 const MAX_HEATPUMP = 5;
 const MAX_WALLBOX = 3;
-const MIN_LOAD_RATIO = 0.5;
 
 const props = defineProps({
   vuf: { type: Number, required: false, default: null },
@@ -200,10 +183,9 @@ const props = defineProps({
   measuredCurrents: { type: Object, required: false, default: () => ({ a: null, b: null, c: null }) },
   measuredTotalPowerW: { type: Number, required: false, default: null },
   batteryMeasuredCurrentA: { type: Number, required: false, default: null },
-  batteryMeasurementToken: { type: Number, required: false, default: null },
 });
 
-const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold', 'heatpump-stop']);
+const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold', 'heatpump-stop', 'state-change']);
 
 const autoEnabled = ref(false);
 const agentState = ref('inactive');
@@ -256,51 +238,44 @@ const policyNumber = (key, fallback) => {
 const vufEnterPct = computed(() => policyNumber('vufEnterPct', CONTROL_POLICY_DEFAULTS.vufEnterPct));
 const vufExitPct = computed(() => Math.min(vufEnterPct.value, policyNumber('vufExitPct', CONTROL_POLICY_DEFAULTS.vufExitPct)));
 const batteryEffectiveMinA = computed(() => policyNumber('batteryEffectiveMinA', CONTROL_POLICY_DEFAULTS.batteryEffectiveMinA));
-const batteryPredictedOnCurrentA = computed(() => policyNumber('batteryPredictedOnCurrentA', CONTROL_POLICY_DEFAULTS.batteryPredictedOnCurrentA));
-const preLimitRatio = computed(() => BATTERY_CONTROL_INTERNALS.preLimitRatio);
-const hardRatio = computed(() => BATTERY_CONTROL_INTERNALS.hardRatio);
-const minImprovement = computed(() => BATTERY_CONTROL_INTERNALS.minVufImprovementPct);
+const preLimitRatio = computed(() => policyNumber('preLimitRatio', CONTROL_POLICY_DEFAULTS.preLimitRatio));
+const criticalRatio = computed(() => policyNumber('criticalRatio', CONTROL_POLICY_DEFAULTS.criticalRatio));
+const hardRatio = computed(() => policyNumber('hardRatio', CONTROL_POLICY_DEFAULTS.hardRatio));
+const minImprovement = computed(() => policyNumber('minVufImprovementPct', CONTROL_POLICY_DEFAULTS.minVufImprovementPct));
+
+const heatpumpAdjustabilityState = computed(() =>
+  heatpumpAdjustabilityRule(policyNumber('heatpumpAdjustability', CONTROL_POLICY_DEFAULTS.heatpumpAdjustability))
+);
+const wallboxAdjustabilityState = computed(() =>
+  wallboxAdjustabilityRule(policyNumber('wallboxAdjustability', CONTROL_POLICY_DEFAULTS.wallboxAdjustability))
+);
+const heatpumpAdjustability = computed(() => heatpumpAdjustabilityState.value.percent);
+const wallboxAdjustability = computed(() => wallboxAdjustabilityState.value.percent);
+const heatpumpLocked = computed(() => heatpumpAdjustabilityState.value.locked);
+const wallboxLocked = computed(() => wallboxAdjustabilityState.value.locked);
+const heatpumpMinAllowedLevel = computed(() => heatpumpAdjustabilityState.value.minLevel);
+const wallboxMinAllowedLevel = computed(() => wallboxAdjustabilityState.value.minLevel);
 
 const headroomRatio = computed(() => {
   const ratios = [];
   const pMax = policyNumber('siteMaxTotalPowerW', 0);
   if (pMax > 0 && Number.isFinite(props.measuredTotalPowerW)) ratios.push(props.measuredTotalPowerW / pMax);
-  const iMax = policyNumber('siteMaxPhaseCurrentA', 0);
-  if (iMax > 0) {
-    for (const value of Object.values(props.measuredCurrents ?? {})) {
-      const current = Number(value);
-      if (Number.isFinite(current)) ratios.push(current / iMax);
-    }
+  for (const phase of ['a', 'b', 'c']) {
+    const limit = phaseCurrentLimitA(props.controlPolicy, phase);
+    const current = Number(props.measuredCurrents?.[phase]);
+    if (limit > 0 && Number.isFinite(current)) ratios.push(current / limit);
   }
   return ratios.length > 0 ? Math.max(...ratios) : null;
 });
 const siteLimitGuardEnabled = computed(() => headroomRatio.value !== null);
-const batteryRamp = reactive({
-  active: false,
-  startedAt: 0,
-  lastSampleToken: null,
-  lastCurrentA: null,
-  samples: [],
-  stableCount: 0,
-  stableDurationMs: 0,
-  slopeAperS: null,
-  stableReady: false,
-  hardOverrideAttempted: false,
-});
-const batteryStabilizationConfidence = ref('unknown');
-
 const batteryEffective = computed(() => {
   if (normalizedDeviceStates.value.batteryCharging !== true) return true;
-  // Do not classify a charger as ineffective while its current is still ramping.
-  if (batteryRamp.active) return true;
   const current = Number(props.batteryMeasuredCurrentA);
   return !Number.isFinite(current) || current >= batteryEffectiveMinA.value;
 });
 
 const awaitingAiExecution = ref(false);
 const aiActionDevice = ref(null);
-const aiBatteryTurnOnExpected = ref(false);
-const resumeBatteryRampAfterAction = ref(false);
 const imbalanceLatched = ref(false);
 
 /*
@@ -376,122 +351,13 @@ watch([normalizedDeviceStates, normalizedHeatpumpMode], ([current, heatpumpMode]
   }
 }, { deep: true });
 
-const resetBatteryRamp = () => {
-  batteryRamp.active = false;
-  batteryRamp.startedAt = 0;
-  batteryRamp.lastSampleToken = null;
-  batteryRamp.lastCurrentA = null;
-  batteryRamp.samples = [];
-  batteryRamp.stableCount = 0;
-  batteryRamp.stableDurationMs = 0;
-  batteryRamp.slopeAperS = null;
-  batteryRamp.stableReady = false;
-  batteryRamp.hardOverrideAttempted = false;
-};
-
-const startBatteryRamp = () => {
-  resetBatteryRamp();
-  batteryStabilizationConfidence.value = 'ramping';
-  batteryRamp.active = true;
-  batteryRamp.startedAt = Date.now();
-  agentState.value = 'battery_ramping';
-  cooldownUntil.value = 0;
-  addLog(
-    'Battery ON confirmed · ramp monitoring',
-    `Live Battery current/P+Q now drives current-state VUF. Normal AI optimization waits for ≥${(BATTERY_CONTROL_INTERNALS.batteryMinSettleMs / 1000).toFixed(1)} s and ${BATTERY_CONTROL_INTERNALS.batteryStableSamples} stable current updates (ΔI ≤ ${BATTERY_CONTROL_INTERNALS.batteryStableDeltaA.toFixed(2)} A), with a ${(BATTERY_CONTROL_INTERNALS.batteryMaxSettleMs / 1000).toFixed(1)} s maximum.`,
-    'monitoring'
-  );
-};
-
-const finishBatteryRamp = reason => {
-  if (!batteryRamp.active) return;
-  const current = Number(props.batteryMeasuredCurrentA);
-  const elapsed = Math.max(0, Date.now() - batteryRamp.startedAt);
-  const stableDuration = batteryRamp.stableDurationMs;
-  const slope = batteryRamp.slopeAperS;
-  resetBatteryRamp();
-  batteryStabilizationConfidence.value = reason === 'stable' ? 'high' : 'low';
-  agentState.value = 'adjusting';
-  cooldownUntil.value = Date.now();
-  const currentText = Number.isFinite(current) ? `${current.toFixed(2)} A` : 'unknown current';
-  const slopeText = Number.isFinite(slope) ? `${slope.toFixed(3)} A/s` : '--';
-  addLog(
-    reason === 'stable' ? 'Battery current stabilized · HIGH confidence' : 'Battery stabilization timeout · LOW confidence',
-    reason === 'stable'
-      ? `${currentText} after ${(elapsed / 1000).toFixed(1)} s. Stable window ${(stableDuration / 1000).toFixed(1)} s, slope ${slopeText}. Normal AI optimization may resume.`
-      : `No high-confidence stabilization within ${(BATTERY_CONTROL_INTERNALS.batteryMaxSettleMs / 1000).toFixed(1)} s. Continue with the latest measured Battery state (${currentText}) but mark stabilization confidence LOW.`,
-    reason === 'stable' ? 'success' : 'warning'
-  );
-};
-
-const maybeFinishStableBatteryRamp = () => {
-  if (!batteryRamp.active || hasPendingDevice.value) return;
-  const elapsed = Date.now() - batteryRamp.startedAt;
-  if (elapsed < BATTERY_CONTROL_INTERNALS.batteryMinSettleMs) return;
-  if (batteryRamp.stableReady) finishBatteryRamp('stable');
-};
-
 watch(hasPendingDevice, (pending, previous) => {
   if (!autoEnabled.value || !awaitingAiExecution.value) return;
   if (previous === true && pending === false) {
     awaitingAiExecution.value = false;
-
-    if (aiActionDevice.value === 'batteryCharging' && aiBatteryTurnOnExpected.value && normalizedDeviceStates.value.batteryCharging === true) {
-      aiBatteryTurnOnExpected.value = false;
-      startBatteryRamp();
-      return;
-    }
-
-    if (resumeBatteryRampAfterAction.value && normalizedDeviceStates.value.batteryCharging === true) {
-      resumeBatteryRampAfterAction.value = false;
-      agentState.value = 'battery_ramping';
-      addLog('Headroom override confirmed · Battery ramp continues', 'The safety/headroom action is complete. Battery stabilization monitoring continues from live current samples.', 'monitoring');
-      maybeFinishStableBatteryRamp();
-      return;
-    }
-
-    aiBatteryTurnOnExpected.value = false;
     agentState.value = 'adjusting';
     cooldownUntil.value = Date.now() + activeSettleMs.value;
     addLog('Execution confirmed · settling', `${aiActionDevice.value ?? 'device'} confirmed. Waiting ${(activeSettleMs.value / 1000).toFixed(1)} s before the next control decision.`, 'monitoring');
-  }
-});
-
-watch(() => props.batteryMeasurementToken, token => {
-  if (!batteryRamp.active || token === null || token === undefined || token === batteryRamp.lastSampleToken) return;
-  batteryRamp.lastSampleToken = token;
-
-  const current = Number(props.batteryMeasuredCurrentA);
-  if (!Number.isFinite(current)) return;
-
-  const evaluated = updateBatteryStabilizationWindow({
-    samples: batteryRamp.samples,
-    startedAtMs: batteryRamp.startedAt,
-    nowMs: Date.now(),
-    currentA: current,
-    minSettleMs: BATTERY_CONTROL_INTERNALS.batteryMinSettleMs,
-    stableDeltaA: BATTERY_CONTROL_INTERNALS.batteryStableDeltaA,
-    stableSamples: BATTERY_CONTROL_INTERNALS.batteryStableSamples,
-    stableDurationMs: BATTERY_CONTROL_INTERNALS.batteryStableDurationMs,
-    stableSlopeAperS: BATTERY_CONTROL_INTERNALS.batteryStableSlopeAperS,
-  });
-
-  batteryRamp.samples = evaluated.samples;
-  batteryRamp.lastCurrentA = current;
-  batteryRamp.stableCount = evaluated.stableCount;
-  batteryRamp.stableDurationMs = evaluated.stableDurationMs;
-  batteryRamp.slopeAperS = evaluated.slopeAperS;
-  batteryRamp.stableReady = evaluated.stableReady;
-  maybeFinishStableBatteryRamp();
-});
-
-watch(() => normalizedDeviceStates.value.batteryCharging, charging => {
-  if (charging === false) {
-    if (batteryRamp.active) resetBatteryRamp();
-    batteryStabilizationConfidence.value = 'idle';
-    if (autoEnabled.value && !hasPendingDevice.value) agentState.value = 'monitoring';
-  } else if (charging === true && !batteryRamp.active && batteryStabilizationConfidence.value === 'idle') {
-    batteryStabilizationConfidence.value = 'unknown';
   }
 });
 
@@ -502,17 +368,15 @@ const vuf = computed(() => props.vuf);
 
 const cooldownRemaining = computed(() => Math.max(0, (cooldownUntil.value - now.value) / 1000));
 const activeSettleMs = computed(() => {
-  if (aiActionDevice.value === 'heatpump') return BATTERY_CONTROL_INTERNALS.heatpumpSettleMs;
-  if (aiActionDevice.value === 'wallbox') return BATTERY_CONTROL_INTERNALS.wallboxSettleMs;
-  if (aiActionDevice.value === 'batteryCharging') return BATTERY_CONTROL_INTERNALS.batteryMinSettleMs;
-  return BATTERY_CONTROL_INTERNALS.heatpumpSettleMs;
+  if (aiActionDevice.value === 'heatpump') return policyNumber('heatpumpSettleMs', CONTROL_POLICY_DEFAULTS.heatpumpSettleMs);
+  if (aiActionDevice.value === 'wallbox') return policyNumber('wallboxSettleMs', CONTROL_POLICY_DEFAULTS.wallboxSettleMs);
+  if (aiActionDevice.value === 'batteryCharging') return policyNumber('batterySettleMs', CONTROL_POLICY_DEFAULTS.batterySettleMs);
+  return CONTROL_POLICY_DEFAULTS.heatpumpSettleMs;
 });
 const cooldownProgress = computed(() => {
   const seconds = Math.max(0.001, activeSettleMs.value / 1000);
   return 100 - Math.min(100, (cooldownRemaining.value / seconds) * 100);
 });
-const batteryRampElapsedS = computed(() => batteryRamp.active ? Math.max(0, now.value - batteryRamp.startedAt) / 1000 : 0);
-const batteryRampProgress = computed(() => Math.min(100, (batteryRampElapsedS.value * 1000 / BATTERY_CONTROL_INTERNALS.batteryMaxSettleMs) * 100));
 
 const formatVuf = value => formatVufPercent(value);
 
@@ -534,10 +398,9 @@ const agentStateDescription = computed(() => {
   if (!autoEnabled.value) return 'Automatic control is disabled.';
   if (agentState.value === 'blocked') return props.controlBlockedReason || 'Automatic control is blocked by hardware/data gate.';
   if (agentState.value === 'pending') return 'A control command is waiting for physical execution feedback.';
-  if (agentState.value === 'battery_ramping') return 'Battery is ON and ramping. Current-state VUF follows live Battery current/P+Q; normal optimization is paused unless a hard site limit is reached.';
-  if (agentState.value === 'adjusting') return 'Execution confirmed. Waiting for the deterministic post-action settling window.';
-  if (normalizedDeviceStates.value.batteryCharging === true && batteryStabilizationConfidence.value === 'low') return 'Battery is ON with LOW stabilization confidence after timeout. Current-state VUF still follows live measurement; control decisions remain explicitly marked as low-confidence Battery context.';
-  return 'Battery-priority VUF control is monitoring raw model-estimated VUF. CUF/load-unbalance control is intentionally deferred.';
+  if (agentState.value === 'adjusting') return 'Execution confirmed. Waiting for the configured post-action settling window.';
+  if (agentState.value === 'critical_unresolved') return 'VUF remains critical and no permitted Battery/Heatpump/Wallbox action can resolve it inside the configured adjustability limits.';
+  return 'Battery-priority VUF control is monitoring raw model-estimated VUF. CUF/Schieflast control is intentionally deferred.';
 });
 
 const predictCandidate = async state => {
@@ -565,14 +428,20 @@ const predictCandidate = async state => {
 
 const getReductionCandidates = current => {
   const candidates = [];
-  if (current.heatpump > 0) {
-    const nextHeatpump = current.heatpump - 1;
-    if (nextHeatpump / MAX_HEATPUMP >= MIN_LOAD_RATIO) candidates.push({ ...current, heatpump: nextHeatpump });
+
+  // Operator adjustability is a hard optimization boundary for normal AI
+  // actions. Heatpump Level 0 remains STOP/ZERO_HOLD semantics and is never
+  // reached by ordinary VUF/headroom derating.
+  if (!heatpumpLocked.value && heatpumpMinAllowedLevel.value !== null && current.heatpump > heatpumpMinAllowedLevel.value) {
+    candidates.push({ ...current, heatpump: current.heatpump - 1 });
   }
 
-  // Wallbox is a 2-bit relay mask, not a linear level.
-  if ((current.wallbox & 1) !== 0) candidates.push({ ...current, wallbox: current.wallbox & ~1 });
-  if ((current.wallbox & 2) !== 0) candidates.push({ ...current, wallbox: current.wallbox & ~2 });
+  // Wallbox states are still physical relay masks (0..3), but for operator
+  // adjustability we use the validated logical load ordering 1 < 2 < 3.
+  // Exactly one logical level is reduced per AI cycle.
+  if (!wallboxLocked.value && wallboxMinAllowedLevel.value !== null && current.wallbox > wallboxMinAllowedLevel.value) {
+    candidates.push({ ...current, wallbox: current.wallbox - 1 });
+  }
 
   if (current.batteryCharging) candidates.push({ ...current, batteryCharging: false });
   return candidates;
@@ -656,10 +525,11 @@ const chooseNextAction = async () => {
     return best;
   };
 
-  // 1) Hard/pre-limit protection has precedence over balancing preference.
-  //    If Battery is already ON and site headroom approaches the configured
-  //    limit, first derate Heatpump or Wallbox by one permitted step.
-  if (siteLimitGuardEnabled.value && normalizedDeviceStates.value.batteryCharging === true && headroomRatio.value >= preLimitRatio.value) {
+  // 1) Capacity PRE-LIMIT/HARD protection has precedence over balancing
+  //    preference, regardless of Battery state. First derate Heatpump or
+  //    Wallbox by one operator-permitted step; if those paths are exhausted
+  //    and Battery is ON, release Battery charging as the next load reduction.
+  if (siteLimitGuardEnabled.value && headroomRatio.value >= preLimitRatio.value) {
     const derating = getReductionCandidates(current).filter(candidate => {
       const key = actionDelta(current, candidate);
       return key === 'heatpump' || key === 'wallbox';
@@ -676,11 +546,17 @@ const chooseNextAction = async () => {
       return { ...evaluated[0], reason: 'headroom_derating' };
     }
 
-    // No HP/WB derating exists. At/above the hard threshold Battery OFF becomes
-    // a last-resort load-reduction action; below hard threshold keep monitoring.
-    if (headroomRatio.value >= hardRatio.value && current.batteryCharging) {
+    // If both operator-limited HP/WB derating paths are exhausted, release the
+    // Battery load itself from PRE-LIMIT upward. Capacity protection outranks
+    // Battery-priority VUF optimization.
+    if (current.batteryCharging) {
       const off = await predictCandidate({ ...current, batteryCharging: false });
-      if (off?.voltageSafe) return { ...off, reason: 'hard_limit_battery_off' };
+      if (off?.voltageSafe) {
+        return {
+          ...off,
+          reason: headroomRatio.value >= hardRatio.value ? 'hard_limit_battery_off' : 'headroom_battery_release',
+        };
+      }
     }
   }
 
@@ -709,7 +585,30 @@ const chooseNextAction = async () => {
   return best ? { ...best, reason: batteryEffective.value ? 'optimize_after_battery' : 'battery_ineffective_fallback' } : null;
 };
 
-const selectAndApplyState = async (repeatedViolation, { fromBatteryRampHardOverride = false } = {}) => {
+const heatpumpAtAdjustabilityFloor = current =>
+  heatpumpLocked.value || heatpumpMinAllowedLevel.value === null || current.heatpump <= heatpumpMinAllowedLevel.value;
+
+const wallboxAtAdjustabilityFloor = current =>
+  wallboxLocked.value || wallboxMinAllowedLevel.value === null || current.wallbox <= wallboxMinAllowedLevel.value;
+
+const batteryCanExitCritical = async current => {
+  // Battery already ON and VUF is still critical: there is no additional ON
+  // action left. When OFF, Battery may only be considered if capacity policy
+  // still permits adding load, and the predicted state actually exits the
+  // VUF critical-enter boundary.
+  if (current.batteryCharging) return false;
+  if (siteLimitGuardEnabled.value && headroomRatio.value >= preLimitRatio.value) return false;
+  const result = await predictCandidate({ ...current, batteryCharging: true });
+  return Boolean(result?.voltageSafe && result.vuf <= vufEnterPct.value);
+};
+
+const shouldEnterCriticalUnresolved = async () => {
+  const current = { ...normalizedDeviceStates.value };
+  if (!heatpumpAtAdjustabilityFloor(current) || !wallboxAtAdjustabilityFloor(current)) return false;
+  return !(await batteryCanExitCritical(current));
+};
+
+const selectAndApplyState = async repeatedViolation => {
   if (!autoEnabled.value || evaluating.value) return;
   if (!props.controlReady) {
     agentState.value = 'blocked';
@@ -724,12 +623,18 @@ const selectAndApplyState = async (repeatedViolation, { fromBatteryRampHardOverr
     if (!autoEnabled.value) return;
     if (!action) {
       prediction.value = null;
-      if (fromBatteryRampHardOverride && batteryRamp.active) {
-        agentState.value = 'battery_ramping';
-        addLog('No hard-limit derating action available', 'Battery ramp monitoring continues; no voltage-safe Heatpump/Wallbox derating candidate was available.', 'warning');
+      const rawVuf = Number(props.vuf);
+      const unresolved = Number.isFinite(rawVuf) && rawVuf > vufEnterPct.value && await shouldEnterCriticalUnresolved();
+      if (unresolved) {
+        agentState.value = 'critical_unresolved';
+        addLog(
+          'CRITICAL unresolved',
+          `VUF ${rawVuf.toFixed(3)}% remains above ${vufEnterPct.value.toFixed(2)}%. Heatpump and Wallbox reached their configured adjustment floor and Battery cannot exit the critical range.`,
+          'critical'
+        );
       } else {
         agentState.value = 'monitoring';
-        addLog('No permitted adjustment found', 'No voltage-safe one-step reduction or compensation action is predicted to improve VUF.', 'warning');
+        addLog('No permitted adjustment found', 'No voltage-safe one-step reduction or compensation action is currently predicted to improve VUF.', 'warning');
       }
       return;
     }
@@ -741,21 +646,19 @@ const selectAndApplyState = async (repeatedViolation, { fromBatteryRampHardOverr
       if (action.state[key] !== current[key]) patch[key] = action.state[key];
     }
     if (Object.keys(patch).length === 0) return;
-    aiBatteryTurnOnExpected.value = Object.hasOwn(patch, 'batteryCharging') && patch.batteryCharging === true;
-    const batteryOffOverride = Object.hasOwn(patch, 'batteryCharging') && patch.batteryCharging === false;
-    if (fromBatteryRampHardOverride && batteryRamp.active && !batteryOffOverride) resumeBatteryRampAfterAction.value = true;
-    if (batteryOffOverride) {
-      resetBatteryRamp();
-      batteryStabilizationConfidence.value = 'idle';
-      resumeBatteryRampAfterAction.value = false;
-    }
     markPending(patch, { heatpumpMode: Object.hasOwn(patch, 'heatpump') ? (patch.heatpump === 0 ? 'zero_hold' : 'start') : null });
     aiActionDevice.value = Object.keys(patch)[0] ?? null;
     awaitingAiExecution.value = true;
     emit('apply-state', patch);
     addLog(
-      action.reason === 'battery_priority' ? 'Battery-priority action selected' : action.reason === 'headroom_derating' ? 'Headroom derating selected' : 'Best one-step balancing action selected',
-      [`Heat pump ${action.state.heatpump}/5`, `Wallbox ${action.state.wallbox}/3`, `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`, `Battery confidence ${batteryStabilizationConfidence.value.toUpperCase()}`, `Predicted VUF ${formatVuf(action.vuf)}`, 'Voltage guard 207–253 V: OK'].join(' · '),
+      action.reason === 'battery_priority'
+        ? 'Battery-priority action selected'
+        : action.reason === 'headroom_derating'
+          ? 'Capacity derating selected'
+          : ['headroom_battery_release', 'hard_limit_battery_off'].includes(action.reason)
+            ? 'Battery released for capacity protection'
+            : 'Best one-step balancing action selected',
+      [`Heat pump ${action.state.heatpump}/5`, `Wallbox ${action.state.wallbox}/3`, `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`, `Predicted VUF ${formatVuf(action.vuf)}`, 'Voltage guard 207–253 V: OK'].join(' · '),
       'action'
     );
     agentState.value = 'pending';
@@ -774,32 +677,6 @@ const evaluateAgent = async () => {
     return;
   }
   if (hasPendingDevice.value) {
-    // Site hard-limit protection must not be blocked by an in-flight Battery
-    // ON request. If the measured site load reaches 100% while Battery start
-    // is still pending, immediately send an OFF override for Battery.
-    if (
-      pendingDevices.batteryCharging &&
-      pendingTargetState.batteryCharging === true &&
-      siteLimitGuardEnabled.value &&
-      headroomRatio.value !== null &&
-      headroomRatio.value >= hardRatio.value
-    ) {
-      aiBatteryTurnOnExpected.value = false;
-      resumeBatteryRampAfterAction.value = false;
-      resetBatteryRamp();
-      pendingTargetState.batteryCharging = false;
-      emit('apply-state', { batteryCharging: false });
-      prediction.value = null;
-      addLog('Battery start aborted by hard site limit', `Headroom ratio ${(headroomRatio.value * 100).toFixed(1)}% reached the 100% hard limit before Battery start completed. Battery OFF override sent.`, 'critical');
-      if (normalizedDeviceStates.value.batteryCharging === false) {
-        clearPending('batteryCharging');
-        awaitingAiExecution.value = false;
-        aiActionDevice.value = 'batteryCharging';
-        agentState.value = 'adjusting';
-        cooldownUntil.value = Date.now() + BATTERY_CONTROL_INTERNALS.batteryMinSettleMs;
-        return;
-      }
-    }
     agentState.value = 'pending';
     return;
   }
@@ -815,27 +692,11 @@ const evaluateAgent = async () => {
   if (rawVuf > vufEnterPct.value) imbalanceLatched.value = true;
   else if (rawVuf < vufExitPct.value) imbalanceLatched.value = false;
 
-  if (agentState.value === 'battery_ramping') {
-    const elapsed = now.value - batteryRamp.startedAt;
-
-    // Normal optimization waits for real current stabilization. Hard site
-    // limits remain active and may interrupt the ramp with immediate HP/WB
-    // derating (or Battery OFF as last resort).
-    if (siteLimitGuardEnabled.value && headroomRatio.value >= hardRatio.value) {
-      if (!batteryRamp.hardOverrideAttempted) {
-        batteryRamp.hardOverrideAttempted = true;
-        addLog('Hard site limit during Battery ramp', `Headroom ratio ${(headroomRatio.value * 100).toFixed(1)}% reached the 100% hard limit. Normal ramp waiting is overridden.`, 'critical');
-        await selectAndApplyState(true, { fromBatteryRampHardOverride: true });
-      }
-      return;
+  if (agentState.value === 'critical_unresolved') {
+    if (!imbalanceLatched.value) {
+      agentState.value = 'monitoring';
+      addLog('Critical state cleared', `Raw estimated VUF ${rawVuf.toFixed(3)}% is below the release threshold ${vufExitPct.value.toFixed(2)}%.`, 'success');
     }
-    batteryRamp.hardOverrideAttempted = false;
-
-    if (elapsed >= BATTERY_CONTROL_INTERNALS.batteryMaxSettleMs) {
-      finishBatteryRamp('timeout');
-      return;
-    }
-    maybeFinishStableBatteryRamp();
     return;
   }
 
@@ -858,12 +719,6 @@ const toggleAuto = () => {
   emit('enabled-change', autoEnabled.value);
   prediction.value = null;
   cooldownUntil.value = 0;
-  if (!autoEnabled.value) {
-    resetBatteryRamp();
-    batteryStabilizationConfidence.value = normalizedDeviceStates.value.batteryCharging === true ? 'unknown' : 'idle';
-    aiBatteryTurnOnExpected.value = false;
-    resumeBatteryRampAfterAction.value = false;
-  }
 
   if (autoEnabled.value) {
     agentState.value = 'monitoring';
@@ -888,8 +743,29 @@ const toggleAuto = () => {
 };
 
 watch(() => props.vuf, () => {
-  if (autoEnabled.value && ['monitoring', 'blocked'].includes(agentState.value)) evaluateAgent();
+  if (!autoEnabled.value) return;
+  if (['monitoring', 'blocked', 'critical_unresolved'].includes(agentState.value)) evaluateAgent();
 });
+
+const retryCriticalUnresolved = () => {
+  if (!autoEnabled.value || agentState.value !== 'critical_unresolved') return;
+  agentState.value = 'monitoring';
+  evaluateAgent();
+};
+
+watch(
+  [
+    normalizedDeviceStates,
+    heatpumpAdjustability,
+    wallboxAdjustability,
+    batteryEffective,
+    headroomRatio,
+  ],
+  retryCriticalUnresolved,
+  { deep: true }
+);
+
+watch(agentState, value => emit('state-change', value), { immediate: true });
 
 watch(() => props.controlReady, ready => {
   if (!autoEnabled.value) return;
@@ -940,5 +816,5 @@ onUnmounted(() => { if (timer.value) window.clearInterval(timer.value); });
 </script>
 
 <style scoped>
-.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.log-dot.critical{background:var(--red)}.dot.pending{background:#ffd166;box-shadow:0 0 12px rgba(255,209,102,.45)}.dot.adjusting,.dot.battery_ramping,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
+.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.dot.critical_unresolved,.log-dot.critical{background:var(--red)}.dot.pending{background:#ffd166;box-shadow:0 0 12px rgba(255,209,102,.45)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.critical-unresolved-blink{color:var(--red);animation:vuf-critical-unresolved-blink 1s infinite}@keyframes vuf-critical-unresolved-blink{0%,49%{opacity:1}50%,100%{opacity:.25}}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
 </style>

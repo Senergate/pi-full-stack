@@ -1,26 +1,16 @@
-Senergate v1.5.1 AI Control Variant B
-Variant: battery_priority_v2_ramping
-Frontend build: v1.5.1-ai-b-ramping-ref140-collapsible-en
-Baseline: Senergate_pi-full-stack_REAL_HARDWARE_PQ_VUF_v1.5.1_BRANCH_AB_VUF23_RUNTIME_FIX_2026-09-12
+Senergate v1.5.1 AI CONTROL C — Capacity Supervisor + Asset Adjustability
+Source: v1.5.1 AI CONTROL B Battery Priority, derived from Baseline v1.5.1 Bugfix.
 
-Integrated features:
-- Battery-priority VUF control
-- Battery OFF->ON prediction with configurable Battery predicted ON current (default 1.04 A, range 0.10-1.30 A)
-- Battery scaling/saturation reference maximum = 1.40 A (internal, not exposed as a normal UI parameter)
-- Battery current ramp/stabilization state using live Shelly current/P+Q
-- Normal AI optimization paused during BATTERY_RAMPING
-- Hard site-limit override remains active during pending/ramping
-- Live-scaled Building-Twin current display from measured prototype current curves
-- VUF history one-point hold fix (stable curve no longer disappears after 10 s)
-- Senergate Grid Impedance panel collapsible; default collapsed
-- Site Limits panel collapsible; default collapsed
-- AI Control Thresholds panel collapsible; default collapsed
-- Strict validated manual input: decimal point '.', max 2 decimal places, invalid drafts never applied
-- User-facing UI text is English only
-- CUF/load-unbalance active control intentionally deferred
-
-
-2026-09-16 WALLBOX VUF LIVE SYNC FIX
-- Current-state Wallbox activity is measurement-driven (>0.02 A) when Shelly current is available.
-- confirmedMask remains reserved for AI/control-state confirmation.
-- VUF history points use the same EnergyMeter sample timestamp as Phase Currents.
+Main changes:
+- Capacity Usage + Remaining Headroom supervisor with P/L1/L2/L3 hard-limit inputs.
+- 100% = configured project hard limit; site limits default 0=disabled.
+- Collapsible Capacity display embedded inside the existing Grid-Impedance / AI-control panel.
+- Heatpump adjustability 1..100 mapping to minimum allowed AI level.
+- Wallbox adjustability 1..100 mapping to minimum allowed AI level / lock.
+- Battery Effective Threshold remains configurable; default 0.10 A.
+- Capacity PRE-LIMIT derating respects operator adjustability boundaries.
+- Battery charging is released if PRE-LIMIT is reached and HP/WB legal derating is exhausted.
+- CRITICAL_UNRESOLVED state when HP + Wallbox are at their permitted floors and Battery cannot exit VUF critical.
+- VUF flashes red with a 1-second period in CRITICAL_UNRESOLVED.
+- Wallbox cross-mask changes use break-before-make command ordering (OFF before ON).
+- CUF/Schieflast active control intentionally remains deferred.

@@ -3,7 +3,7 @@
     <div class="eyebrow">Estimated three-phase voltage unbalance</div>
 
     <div class="big-status">
-      <div class="value">{{ formattedVuf }}</div>
+      <div class="value" :class="{ 'critical-unresolved-blink': criticalUnresolved }">{{ formattedVuf }}</div>
       <div class="state" :class="statusClass">{{ statusLabel }}</div>
     </div>
 
@@ -59,13 +59,10 @@ const props = defineProps({
     required: false,
     default: null,
   },
-  // Timestamp of the EnergyMeter snapshot that produced the current VUF.
-  // Using the same performance.now() time base as SimpleDashboard aligns
-  // Phase Current and VUF history to the same physical measurement event.
-  sampleTs: {
-    type: Number,
+  criticalUnresolved: {
+    type: Boolean,
     required: false,
-    default: null,
+    default: false,
   },
 });
 
@@ -108,7 +105,7 @@ const gaugeWidth = computed(() =>
   safeVuf.value === null ? '0%' : `${Math.min(100, (safeVuf.value / 4) * 100)}%`
 );
 
-const addPoint = (value, sampleTs = null) => {
+const addPoint = value => {
   if (value === null || value === undefined || value === '') {
     return;
   }
@@ -116,19 +113,8 @@ const addPoint = (value, sampleTs = null) => {
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue)) return;
 
-  const hasSampleTs = sampleTs !== null && sampleTs !== undefined && sampleTs !== '';
-  const suppliedTs = hasSampleTs ? Number(sampleTs) : NaN;
-  const ts = Number.isFinite(suppliedTs) && suppliedTs >= 0
-    ? suppliedTs
-    : performance.now();
-
-  const last = graphState.data[graphState.data.length - 1];
-  if (last && Math.abs(last.ts - ts) < 0.001 && Math.abs(last.vuf - numericValue) < 1e-12) {
-    return;
-  }
-
   graphState.data.push({
-    ts,
+    ts: performance.now(),
     vuf: Math.max(0, numericValue),
   });
 
@@ -233,10 +219,7 @@ const drawThreshold = (ctx, mapY, padding, width) => {
 };
 
 const drawLine = (ctx, points, mapX, mapY, plotLeft, plotTop, plotWidth, plotHeight) => {
-  // A single retained history sample is sufficient because the last known VUF
-  // is extended to performance.now(). This prevents a stable trace from
-  // disappearing after the 10-second history window passes the last change.
-  if (points.length === 0) {
+  if (points.length < 2) {
     return;
   }
 
@@ -261,10 +244,6 @@ const drawLine = (ctx, points, mapX, mapY, plotLeft, plotTop, plotWidth, plotHei
   ctx.moveTo(mapX(points[0].ts), mapY(points[0].vuf));
 
   for (let i = 1; i < points.length; i += 1) {
-    // VUF samples represent discrete controller/measurement states. Hold the
-    // previous value until the timestamp of the new sample, then step
-    // vertically to the new value instead of drawing a misleading diagonal.
-    ctx.lineTo(mapX(points[i].ts), mapY(points[i - 1].vuf));
     ctx.lineTo(mapX(points[i].ts), mapY(points[i].vuf));
   }
 
@@ -381,11 +360,9 @@ const drawGraph = () => {
 };
 
 watch(
-  () => [props.vuf, props.sampleTs],
-  ([value, sampleTs]) => {
-    // History uses the same EnergyMeter sample timestamp that updated the
-    // Phase Currents. This removes visual time skew between the two cards.
-    addPoint(value, sampleTs);
+  () => props.vuf,
+  value => {
+    addPoint(value);
   },
   {
     immediate: true,
@@ -574,6 +551,17 @@ onUnmounted(() => {
   border: 1px solid rgba(88, 231, 255, 0.15);
   border-radius: 8px;
   background: rgba(3, 15, 24, 0.4);
+}
+
+
+.critical-unresolved-blink {
+  color: var(--red);
+  animation: vuf-critical-unresolved-blink 1s infinite;
+}
+
+@keyframes vuf-critical-unresolved-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.25; }
 }
 
 </style>

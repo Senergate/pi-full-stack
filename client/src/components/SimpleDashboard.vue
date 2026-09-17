@@ -17,17 +17,11 @@ import {
   classifyBranchAStatusForCommand,
   shouldCompleteBranchACommand,
 } from '../BranchACommandCorrelation.js';
-import { BATTERY_CONTROL_INTERNALS, CONTROL_INPUT_SPECS, cloneControlPolicyDefaults } from '../ControlPolicyConfig.js';
-import { formatControlValue, validateControlInput, validateControlPolicyRelations, validateDecimalInput } from '../ControlInputValidation.js';
-import { applyBatteryPowerToModel, batteryPowerForCurrent } from '../BatteryDynamicPowerModel.js';
-import { applyHeatpumpPowerToModel, heatpumpPhysicalActiveForMeasurement, heatpumpPowerForCurrent } from '../HeatpumpDynamicPowerModel.js';
-import { PROTOTYPE_CURRENT_REFERENCE_MAX_A, projectLiveScaledBuildingCurrents } from '../PrototypeCurrentTwinModel.js';
-import { applyWallboxPowerToModel, wallboxPhysicalActiveForMeasurement, wallboxPowerForCurrent } from '../WallboxDynamicPowerModel.js';
+import { cloneControlPolicyDefaults } from '../ControlPolicyConfig.js';
+import { computeCapacityStatus, heatpumpAdjustabilityRule, wallboxAdjustabilityRule } from '../CapacitySupervisor.js';
 import {
-  BUILDING_TARGETS,
   DEFAULT_ELECTRICAL_PROFILES,
   baselineVoltagesFromProfiles,
-  modelAssetPower,
   modelBuildingPowers,
   profileSummary,
 } from '../ElectricalProfileModel.js';
@@ -82,7 +76,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-b-phase2-model-consistency-fix';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-c-capacity-adjustability';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -92,7 +86,7 @@ const CURRENT_ZERO_OFFSET_A = { a: 0.24, b: 0.19, c: 0.13 };
 const _ = reactive({
   count: 0,
   heatpump: { level: null, twinLevel: null, mode: null, commanded: null, effectiveTargetHz: null, effectiveTargetSource: null, targetHz: null, actualHz: null, executionState: '' },
-  wallbox: { load: null, r0: null, r1: null, r0Update: null, r1Update: null, confirmedMask: null, targetMask: null },
+  wallbox: { load: null, r0: null, r1: null, r0Update: null, r1Update: null },
   battery: { charging: null, lastUpdate: null },
   energy_meter: {
     timedelta: null,
@@ -117,8 +111,8 @@ const _ = reactive({
     profiles: JSON.parse(JSON.stringify(DEFAULT_ELECTRICAL_PROFILES)),
     calibration: { running: false, progress: { stage: 'idle', index: 0, total: 0, message: '' } },
   },
-  agent: { enabled: false },
-  controlPolicy: cloneControlPolicyDefaults('battery_priority_v2_ramping'),
+  agent: { enabled: false, state: 'inactive' },
+  controlPolicy: cloneControlPolicyDefaults('battery_priority_capacity_adjustability_v2'),
   mqtt: { connected: false, lastHeartbeatAt: null },
   startup: {
     phase: 'connecting',
@@ -139,130 +133,6 @@ let unwatchBranchAState = null;
 let boundRuntime = false;
 let startupTimer = null;
 let heatpumpCommandGeneration = 0;
-let wallboxCommitTimer = null;
-let wallboxTargetTimer = null;
-const WALLBOX_EXTERNAL_COMMIT_DEBOUNCE_MS = 350;
-const WALLBOX_TARGET_TIMEOUT_MS = 5000;
-
-const GRID_PANEL_STORAGE_KEY = 'senergate.gridImpedancePanelOpen';
-const gridImpedanceOpen = ref(false);
-if (typeof window !== 'undefined') {
-  try {
-    gridImpedanceOpen.value = window.localStorage?.getItem(GRID_PANEL_STORAGE_KEY) === 'true';
-  } catch {
-    gridImpedanceOpen.value = false;
-  }
-}
-watch(gridImpedanceOpen, value => {
-  if (typeof window === 'undefined') return;
-  try { window.localStorage?.setItem(GRID_PANEL_STORAGE_KEY, value ? 'true' : 'false'); } catch { /* UI preference only */ }
-});
-
-// Operational configuration panels are intentionally collapsed on every page
-// load. Their visibility is UI-only and never changes the active controller
-// values or the underlying safety/control logic.
-const siteLimitsOpen = ref(false);
-const aiThresholdsOpen = ref(false);
-
-const policyDraft = reactive(Object.fromEntries(
-  Object.keys(CONTROL_INPUT_SPECS).map(key => [key, formatControlValue(key, _.controlPolicy[key])])
-));
-const policyErrors = reactive(Object.fromEntries(Object.keys(CONTROL_INPUT_SPECS).map(key => [key, ''])));
-
-// Manual Grid-Impedance edits use the same strict decimal-input contract as
-// the visible control parameters: digits + "." only and max 2 decimals.
-// Preset values intentionally keep their original engineering precision
-// (e.g. 0.091 Ω) so opening/collapsing this advanced panel cannot change the
-// existing v1.5.1 model. The strict rule is applied only after a user edits a
-// field; invalid drafts never replace the active impedance.
-const GRID_INPUT_SPECS = Object.freeze({
-  rPhase: Object.freeze({ min: 0.00, max: 1.00, unit: 'Ω', decimals: 2 }),
-  xPhase: Object.freeze({ min: 0.00, max: 1.00, unit: 'Ω', decimals: 2 }),
-  rNeutral: Object.freeze({ min: 0.00, max: 1.00, unit: 'Ω', decimals: 2 }),
-  xNeutral: Object.freeze({ min: 0.00, max: 1.00, unit: 'Ω', decimals: 2 }),
-});
-const gridDraft = reactive({
-  rPhase: String(_.grid.rPhase),
-  xPhase: String(_.grid.xPhase),
-  rNeutral: String(_.grid.rNeutral),
-  xNeutral: String(_.grid.xNeutral),
-});
-const gridErrors = reactive({ rPhase: '', xPhase: '', rNeutral: '', xNeutral: '' });
-const gridDirty = reactive({ rPhase: false, xPhase: false, rNeutral: false, xNeutral: false });
-
-const syncGridDraftFromActive = () => {
-  for (const key of Object.keys(GRID_INPUT_SPECS)) {
-    gridDraft[key] = String(_.grid[key]);
-    gridErrors[key] = '';
-    gridDirty[key] = false;
-  }
-};
-
-const onGridDraftInput = (key, event) => {
-  const raw = String(event?.target?.value ?? '');
-  gridDraft[key] = raw;
-  gridDirty[key] = true;
-  const result = validateDecimalInput(raw, GRID_INPUT_SPECS[key]);
-  gridErrors[key] = result.valid ? '' : result.error;
-};
-
-const commitGridField = key => {
-  if (!gridDirty[key]) return true;
-  const result = validateDecimalInput(gridDraft[key], GRID_INPUT_SPECS[key]);
-  if (!result.valid) {
-    gridErrors[key] = result.error;
-    return false;
-  }
-  _.grid[key] = result.value;
-  gridDraft[key] = result.value.toFixed(GRID_INPUT_SPECS[key].decimals);
-  gridErrors[key] = '';
-  gridDirty[key] = false;
-  markGridCustom();
-  return true;
-};
-
-const validateProspectivePolicy = (key, value) => {
-  const candidate = { ..._.controlPolicy, [key]: value };
-  return validateControlPolicyRelations(candidate, key);
-};
-
-const onPolicyDraftInput = (key, event) => {
-  const raw = String(event?.target?.value ?? '');
-  policyDraft[key] = raw;
-  const field = validateControlInput(key, raw);
-  if (!field.valid) {
-    policyErrors[key] = field.error;
-    return;
-  }
-  const relation = validateProspectivePolicy(key, field.value);
-  policyErrors[key] = relation.valid ? '' : relation.error;
-};
-
-const commitPolicyField = key => {
-  const field = validateControlInput(key, policyDraft[key]);
-  if (!field.valid) {
-    policyErrors[key] = field.error;
-    return false;
-  }
-  const relation = validateProspectivePolicy(key, field.value);
-  if (!relation.valid) {
-    policyErrors[key] = relation.error;
-    return false;
-  }
-  _.controlPolicy[key] = field.value;
-  policyDraft[key] = formatControlValue(key, field.value);
-  policyErrors[key] = '';
-
-  // A successfully committed relational field can make an earlier draft valid.
-  for (const relatedKey of ['vufEnterPct', 'vufExitPct', 'batteryPredictedOnCurrentA', 'batteryEffectiveMinA']) {
-    if (relatedKey === key) continue;
-    const related = validateControlInput(relatedKey, policyDraft[relatedKey]);
-    if (!related.valid) continue;
-    const relatedRelation = validateControlPolicyRelations({ ..._.controlPolicy, [relatedKey]: related.value }, relatedKey);
-    if (relatedRelation.valid) policyErrors[relatedKey] = '';
-  }
-  return true;
-};
 
 const heatpumpTwinUsesCommandTrajectory = computed(() => {
   const confirmed = numberOrNull(_.heatpump.level);
@@ -274,7 +144,9 @@ const heatpumpTwinUsesCommandTrajectory = computed(() => {
 });
 
 const currentSourceLabel = computed(() =>
-  'BUILDING TWIN · LIVE-SCALED FROM SHELLY · REAL PROTOTYPE CURRENT CURVES'
+  heatpumpTwinUsesCommandTrajectory.value
+    ? 'BUILDING-SCALE DIGITAL TWIN · P/Q COMMAND TRAJECTORY (execution pending)'
+    : 'BUILDING-SCALE DIGITAL TWIN · P/Q PROFILE FROM REAL execution state'
 );
 const currentYRange = computed(() => ({ min: 0, max: 100 }));
 const STARTUP_TIMEOUT_MS = 6000;
@@ -400,10 +272,6 @@ const markRealStateWaiting = () => {
   _.wallbox.r1 = null;
   _.wallbox.r0Update = null;
   _.wallbox.r1Update = null;
-  _.wallbox.confirmedMask = null;
-  _.wallbox.targetMask = null;
-  if (wallboxCommitTimer !== null) { clearTimeout(wallboxCommitTimer); wallboxCommitTimer = null; }
-  if (wallboxTargetTimer !== null) { clearTimeout(wallboxTargetTimer); wallboxTargetTimer = null; }
   _.battery.charging = null;
   _.battery.lastUpdate = null;
   _.realFeedback.branchA = { payload: null, ack: null, lastUpdate: null, ackUpdate: null };
@@ -419,7 +287,6 @@ const setGridPreset = key => {
   _.grid.rNeutral = preset.rNeutral;
   _.grid.xNeutral = preset.xNeutral;
   _.grid.provenance = preset.provenance ?? 'modeled';
-  syncGridDraftFromActive();
 };
 
 const phaseResistance = computed(() => {
@@ -477,73 +344,11 @@ const measuredVoltages = computed(() => ({
   c: numberOrNull(_.energy_meter.measured.c_voltage),
 }));
 
-const rawWallboxMask = computed(() => (_.wallbox.r0 === null || _.wallbox.r1 === null)
-  ? null
-  : wallboxMaskFromRelays(_.wallbox.r0, _.wallbox.r1));
-
-const commitWallboxMask = mask => {
-  const safeMask = clampInt(mask, 0, 3);
-  _.wallbox.confirmedMask = safeMask;
-  _.wallbox.load = safeMask;
-};
-
-const clearWallboxCommitTimer = () => {
-  if (wallboxCommitTimer !== null) {
-    clearTimeout(wallboxCommitTimer);
-    wallboxCommitTimer = null;
-  }
-};
-
-const clearWallboxTargetTimer = () => {
-  if (wallboxTargetTimer !== null) {
-    clearTimeout(wallboxTargetTimer);
-    wallboxTargetTimer = null;
-  }
-};
-
-const scheduleExternalWallboxCommit = () => {
-  clearWallboxCommitTimer();
-  const scheduledMask = rawWallboxMask.value;
-  if (scheduledMask === null) return;
-  wallboxCommitTimer = setTimeout(() => {
-    wallboxCommitTimer = null;
-    // External/manual relay changes are committed only after the combined
-    // two-relay mask has remained unchanged for a short debounce window.
-    // This filters transient mask 0 / mask 3 states during mask1 <-> mask2.
-    if (_.wallbox.targetMask === null && rawWallboxMask.value === scheduledMask) {
-      commitWallboxMask(scheduledMask);
-    }
-  }, WALLBOX_EXTERNAL_COMMIT_DEBOUNCE_MS);
-};
-
-const beginWallboxTarget = targetMask => {
-  const safeTarget = clampInt(targetMask, 0, 3);
-  clearWallboxCommitTimer();
-  clearWallboxTargetTimer();
-  _.wallbox.targetMask = safeTarget;
-
-  // If hardware is already at the requested combined mask, commit atomically.
-  if (rawWallboxMask.value === safeTarget) {
-    commitWallboxMask(safeTarget);
-    _.wallbox.targetMask = null;
-    return;
-  }
-
-  wallboxTargetTimer = setTimeout(() => {
-    wallboxTargetTimer = null;
-    // Do not invent success on timeout. Release the target guard and debounce
-    // the latest physically observed combined state instead.
-    _.wallbox.targetMask = null;
-    scheduleExternalWallboxCommit();
-  }, WALLBOX_TARGET_TIMEOUT_MS);
-};
-
 const currentDeviceStateForModel = computed(() => {
   const heatpumpLevel = numberOrNull(_.heatpump.twinLevel);
-  // The model/agent consumes only an atomically confirmed combined Wallbox
-  // mask. During a two-relay transition, keep the previous confirmed mask
-  // instead of exposing transient mask 0 / mask 3 states.
-  const wallboxMask = numberOrNull(_.wallbox.confirmedMask) ?? rawWallboxMask.value;
+  const wallboxMask = (_.wallbox.r0 === null || _.wallbox.r1 === null)
+    ? null
+    : wallboxMaskFromRelays(_.wallbox.r0, _.wallbox.r1);
   const batteryCharging = _.battery.charging;
   return { heatpumpLevel, wallboxMask, batteryCharging };
 });
@@ -566,132 +371,15 @@ const baselineModel = computed(() => {
   return baselineVoltagesFromProfiles(activeProfiles.value, liveOffFallback);
 });
 
-const modelWithBatteryCurrent = (model, currentA, { fallbackToFull = true, preferMeasuredPq = false } = {}) => {
-  if (!model) return null;
-  if (preferMeasuredPq && batteryLiveBuildingPower.value) {
-    return applyBatteryPowerToModel(model, batteryLiveBuildingPower.value);
-  }
-  const dynamicBattery = batteryPowerForCurrent({
-    fullPower: model.powers?.c,
-    currentA,
-    referenceMaxA: BATTERY_CONTROL_INTERNALS.referenceMaxA,
-    fallbackToFull,
-  });
-  return applyBatteryPowerToModel(model, dynamicBattery);
-};
-
-const heatpumpLiveBuildingPower = computed(() => {
-  const measuredCurrent = numberOrNull(measuredCurrents.value.a);
-  if (measuredCurrent === null) return null;
-
-  const baseline = activeProfiles.value?.baseline?.measured?.a;
-  const rawP = numberOrNull(_.energy_meter.raw?.a_act_power);
-  const rawS = firstNumber(
-    _.energy_meter.raw?.a_aprt_power,
-    _.energy_meter.raw?.a_apparent_power,
-    numberOrNull(_.energy_meter.raw?.a_voltage) !== null && numberOrNull(_.energy_meter.raw?.a_current) !== null
-      ? Math.abs(Number(_.energy_meter.raw.a_voltage) * Number(_.energy_meter.raw.a_current))
-      : null,
-  );
-  const baselineP = firstNumber(baseline?.p_w, baseline?.active_power_w);
-  const baselineQ = firstNumber(baseline?.q_var, baseline?.reactive_power_var);
-
-  // Prefer calibrated incremental Shelly P/Q when a valid OFF baseline exists.
-  // If calibration is unavailable, buildingPowerModel falls back to live-current
-  // scaling of the Heatpump full P/Q profile below.
-  if (rawP === null || rawS === null || baselineP === null || baselineQ === null || rawS + 1e-6 < Math.abs(rawP)) return null;
-
-  const rawQ = Math.sqrt(Math.max(0, rawS * rawS - rawP * rawP));
-  const deltaP = Math.max(0, rawP - baselineP);
-  const deltaQ = rawQ - baselineQ;
-  const referenceCurrent = PROTOTYPE_CURRENT_REFERENCE_MAX_A.heatpump;
-  const saturationFactor = measuredCurrent > referenceCurrent && measuredCurrent > 1e-9
-    ? referenceCurrent / measuredCurrent
-    : 1;
-  const ratio = Math.max(0, Math.min(1, measuredCurrent / referenceCurrent));
-  const scale = BUILDING_TARGETS.heatpumpMaxCurrentA / referenceCurrent;
-  return {
-    p: deltaP * scale * saturationFactor,
-    q: deltaQ * scale * saturationFactor,
-    ratio,
-    source: 'live_shelly_delta_pq_scaled_heatpump_saturated',
-  };
-});
-
 const buildingPowerModel = computed(() => {
   const state = currentDeviceStateForModel.value;
-  let model = modelBuildingPowers({
+  return modelBuildingPowers({
     profiles: activeProfiles.value,
     heatpumpLevel: state.heatpumpLevel,
     wallboxMask: state.wallboxMask,
     batteryCharging: state.batteryCharging,
     phaseVoltages: baselineModel.value.voltages,
   });
-  if (!model) return null;
-
-  // Current-state Heatpump VUF follows the same live Shelly phase-A current
-  // used by the Current Card. A calibrated incremental P/Q measurement is
-  // preferred; otherwise the full Heatpump profile is scaled by live current.
-  if (state.heatpumpLevel !== null && state.heatpumpLevel !== undefined) {
-    const liveHeatpumpCurrentA = measuredCurrents.value.a;
-    const heatpumpPhysicalActive = heatpumpPhysicalActiveForMeasurement({
-      currentA: liveHeatpumpCurrentA,
-      fallbackActive: Number(state.heatpumpLevel) > 0,
-    });
-    if (!heatpumpPhysicalActive) {
-      model = applyHeatpumpPowerToModel(model, { p: 0, q: 0, ratio: 0, source: 'heatpump_off' });
-    } else if (heatpumpLiveBuildingPower.value) {
-      model = applyHeatpumpPowerToModel(model, heatpumpLiveBuildingPower.value);
-    } else {
-      const fullHeatpump = modelAssetPower({
-        profiles: activeProfiles.value,
-        assetName: 'heatpump',
-        state: HEATPUMP_LEVELS,
-        voltageV: baselineModel.value.voltages.a,
-      });
-      const dynamicHeatpump = heatpumpPowerForCurrent({
-        fullPower: fullHeatpump,
-        fallbackPower: model.powers?.a,
-        currentA: liveHeatpumpCurrentA,
-        referenceMaxA: PROTOTYPE_CURRENT_REFERENCE_MAX_A.heatpump,
-        active: true,
-      });
-      model = applyHeatpumpPowerToModel(model, dynamicHeatpump);
-    }
-  }
-
-  // Current-state Wallbox VUF follows the same live Shelly current used by the
-  // Building-Twin current card. Candidate prediction below remains state based
-  // so hypothetical masks 1/2/3 can still be evaluated before execution.
-  if (state.wallboxMask !== null && state.wallboxMask !== undefined) {
-    const fullWallbox = modelAssetPower({
-      profiles: activeProfiles.value,
-      assetName: 'wallbox',
-      state: 3,
-      voltageV: baselineModel.value.voltages.b,
-    });
-    const liveWallboxCurrentA = measuredCurrents.value.b;
-    const wallboxPhysicalActive = wallboxPhysicalActiveForMeasurement({
-      currentA: liveWallboxCurrentA,
-      fallbackActive: Number(state.wallboxMask) > 0,
-    });
-    const dynamicWallbox = wallboxPowerForCurrent({
-      fullPower: fullWallbox,
-      fallbackPower: model.powers?.b,
-      currentA: liveWallboxCurrentA,
-      referenceMaxA: PROTOTYPE_CURRENT_REFERENCE_MAX_A.wallbox,
-      active: wallboxPhysicalActive,
-    });
-    model = applyWallboxPowerToModel(model, dynamicWallbox);
-  }
-
-  if (state.batteryCharging === true) {
-    // Once Battery is physically ON, current-state VUF follows the measured
-    // charger ramp instead of jumping immediately to the full ON operating point.
-    model = modelWithBatteryCurrent(model, batteryMeasuredCurrentA.value, { fallbackToFull: true, preferMeasuredPq: true });
-  }
-
-  return model;
 });
 
 const vufResult = computed(() => {
@@ -710,17 +398,14 @@ const vufResult = computed(() => {
   });
 });
 
-// MODELED current display for Variant B. The bars follow live Shelly currents
-// scaled with the user-confirmed prototype curves. Current-state Wallbox VUF
-// now consumes the same live phase-B current through WallboxDynamicPowerModel.
 const projectedCurrents = computed(() => {
-  const state = currentDeviceStateForModel.value;
-  return projectLiveScaledBuildingCurrents({
-    measuredCurrents: measuredCurrents.value,
-    heatpumpLevel: state.heatpumpLevel,
-    wallboxMask: rawWallboxMask.value ?? state.wallboxMask,
-    batteryCharging: state.batteryCharging,
-  });
+  const values = vufResult.value?.currentMagnitudes;
+  if (!values) return { a: null, b: null, c: null };
+  return {
+    a: numberOrNull(values.a),
+    b: numberOrNull(values.b),
+    c: numberOrNull(values.c),
+  };
 });
 
 const currentVuf = computed(() => numberOrNull(vufResult.value?.vufPercent));
@@ -895,10 +580,8 @@ const heatpumpMode = computed(() => {
 });
 
 const wallboxLevel = computed(() => {
-  const confirmed = numberOrNull(_.wallbox.confirmedMask);
-  if (confirmed !== null) return clampInt(confirmed, 0, 3);
-  if (rawWallboxMask.value !== null) return clampInt(rawWallboxMask.value, 0, 3);
-  return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
+  if (_.wallbox.r0 === null || _.wallbox.r1 === null) return numberOrNull(_.wallbox.load) === null ? null : clampInt(_.wallbox.load, 0, 3);
+  return (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
 });
 
 const batteryCharging = computed(() => (_.battery.charging === null ? null : _.battery.charging === true));
@@ -920,58 +603,53 @@ const batteryMeasuredCurrentA = computed(() => {
   return measuredCurrents.value.c;
 });
 
-const batteryLiveBuildingPower = computed(() => {
-  if (batteryCharging.value !== true) return null;
+const capacityStatus = computed(() => computeCapacityStatus({
+  policy: _.controlPolicy,
+  measuredCurrents: measuredCurrents.value,
+  measuredTotalPowerW: measuredTotalPowerW.value,
+}));
 
-  const baseline = activeProfiles.value?.baseline?.measured?.c;
-  const rawP = numberOrNull(_.energy_meter.raw?.c_act_power);
-  const rawS = firstNumber(
-    _.energy_meter.raw?.c_aprt_power,
-    _.energy_meter.raw?.c_apparent_power,
-    numberOrNull(_.energy_meter.raw?.c_voltage) !== null && numberOrNull(_.energy_meter.raw?.c_current) !== null
-      ? Math.abs(Number(_.energy_meter.raw.c_voltage) * Number(_.energy_meter.raw.c_current))
-      : null,
-  );
-  const baselineP = firstNumber(baseline?.p_w, baseline?.active_power_w);
-  const baselineQ = firstNumber(baseline?.q_var, baseline?.reactive_power_var);
+const siteLimitsEnabled = computed(() => capacityStatus.value.enabled);
+const capacityMetrics = computed(() => capacityStatus.value.metrics);
+const limitingCapacityMetric = computed(() => capacityStatus.value.limitingMetric);
+const capacityUsageRatio = computed(() => capacityStatus.value.usageRatio);
+const siteHeadroomRatio = capacityUsageRatio;
+const remainingHeadroomRatio = computed(() => capacityStatus.value.remainingRatio);
+const capacityState = computed(() => capacityStatus.value.state);
+const capacityUsagePercent = computed(() => capacityUsageRatio.value === null ? null : capacityUsageRatio.value * 100);
+const remainingHeadroomPercent = computed(() => remainingHeadroomRatio.value === null ? null : remainingHeadroomRatio.value * 100);
 
-  // Use truly incremental Shelly P/Q only when an OFF-state calibration exists.
-  // Otherwise fall back to live-current scaling of the existing battery P/Q profile.
-  if (rawP === null || rawS === null || baselineP === null || baselineQ === null || rawS + 1e-6 < Math.abs(rawP)) return null;
+const heatpumpAdjustabilityState = computed(() => heatpumpAdjustabilityRule(_.controlPolicy.heatpumpAdjustability));
+const wallboxAdjustabilityState = computed(() => wallboxAdjustabilityRule(_.controlPolicy.wallboxAdjustability));
+const heatpumpMinAllowedLabel = computed(() => heatpumpAdjustabilityState.value.locked ? 'LOCKED' : `Level ${heatpumpAdjustabilityState.value.minLevel}`);
+const wallboxMinAllowedLabel = computed(() => wallboxAdjustabilityState.value.locked ? 'LOCKED' : `Level ${wallboxAdjustabilityState.value.minLevel}`);
 
-  const rawQ = Math.sqrt(Math.max(0, rawS * rawS - rawP * rawP));
-  const deltaP = Math.max(0, rawP - baselineP);
-  const deltaQ = rawQ - baselineQ;
-  const measuredCurrent = Math.max(0, Number(batteryMeasuredCurrentA.value) || 0);
-  const referenceCurrent = BATTERY_CONTROL_INTERNALS.referenceMaxA;
-  const ratio = Math.max(0, Math.min(1, measuredCurrent / referenceCurrent));
-  const saturationFactor = measuredCurrent > referenceCurrent && measuredCurrent > 1e-9
-    ? referenceCurrent / measuredCurrent
-    : 1;
-  const scale = BUILDING_TARGETS.batteryMaxCurrentA / referenceCurrent;
-  return {
-    p: deltaP * scale * saturationFactor,
-    q: deltaQ * scale * saturationFactor,
-    ratio,
-    source: 'live_shelly_delta_pq_scaled_to_building_saturated',
-  };
+const formatCapacityValue = (value, unit) => {
+  if (!Number.isFinite(Number(value))) return '--';
+  const numeric = Number(value);
+  if (unit === 'W' && Math.abs(numeric) >= 1000) return `${(numeric / 1000).toFixed(2)} kW`;
+  if (unit === 'W') return `${numeric.toFixed(0)} W`;
+  if (unit === 'A') return `${numeric.toFixed(2)} A`;
+  return `${numeric.toFixed(2)} ${unit ?? ''}`.trim();
+};
+
+const capacityPanelExpanded = ref(false);
+const CAPACITY_PANEL_STORAGE_KEY = 'senergate.capacityPanelExpanded';
+
+onMounted(() => {
+  try {
+    capacityPanelExpanded.value = window.localStorage.getItem(CAPACITY_PANEL_STORAGE_KEY) === '1';
+  } catch {
+    capacityPanelExpanded.value = false;
+  }
 });
 
-const siteLimitsEnabled = computed(() =>
-  Number(_.controlPolicy.siteMaxTotalPowerW) > 0 || Number(_.controlPolicy.siteMaxPhaseCurrentA) > 0
-);
-
-const siteHeadroomRatio = computed(() => {
-  const ratios = [];
-  const pMax = Number(_.controlPolicy.siteMaxTotalPowerW);
-  if (pMax > 0 && measuredTotalPowerW.value !== null) ratios.push(measuredTotalPowerW.value / pMax);
-  const iMax = Number(_.controlPolicy.siteMaxPhaseCurrentA);
-  if (iMax > 0) {
-    for (const current of Object.values(measuredCurrents.value)) {
-      if (current !== null) ratios.push(current / iMax);
-    }
+watch(capacityPanelExpanded, value => {
+  try {
+    window.localStorage.setItem(CAPACITY_PANEL_STORAGE_KEY, value ? '1' : '0');
+  } catch {
+    // localStorage may be unavailable in restricted browser environments.
   }
-  return ratios.length > 0 ? Math.max(...ratios) : null;
 });
 
 const agentDeviceStates = computed(() => ({
@@ -981,62 +659,15 @@ const agentDeviceStates = computed(() => ({
   batteryCharging: batteryCharging.value,
 }));
 
-const applyCounterfactualProfilePower = (model, assetName, state) => {
-  const phase = assetName === 'heatpump' ? 'a' : assetName === 'wallbox' ? 'b' : 'c';
-  const voltageV = baselineModel.value.voltages?.[phase];
-  const profilePower = modelAssetPower({
-    profiles: activeProfiles.value,
-    assetName,
-    state,
-    voltageV,
-  });
-  const dynamic = {
-    p: profilePower.p,
-    q: profilePower.q,
-    ratio: null,
-    source: `counterfactual_profile_${assetName}_${state}`,
-  };
-  if (assetName === 'heatpump') return applyHeatpumpPowerToModel(model, dynamic);
-  if (assetName === 'wallbox') return applyWallboxPowerToModel(model, dynamic);
-  return applyBatteryPowerToModel(model, dynamic);
-};
-
 const predictVufForDeviceState = candidate => {
-  const current = currentDeviceStateForModel.value;
-  const candidateState = {
-    heatpump: numberOrNull(candidate?.heatpump),
-    wallbox: numberOrNull(candidate?.wallbox),
-    batteryCharging: candidate?.batteryCharging === true,
-  };
-  if (candidateState.heatpump === null || candidateState.wallbox === null || candidate?.batteryCharging === null || candidate?.batteryCharging === undefined) return null;
-
-  // Counterfactual freeze: start from the current physical live-P/Q model.
-  // Unchanged assets remain exactly at their current measured operating point;
-  // only assets that actually change are replaced by the target profile. This
-  // prevents artificial P/Q jumps from contaminating predicted ΔVUF.
-  let model = buildingPowerModel.value;
+  const model = modelBuildingPowers({
+    profiles: activeProfiles.value,
+    heatpumpLevel: candidate.heatpump,
+    wallboxMask: candidate.wallbox,
+    batteryCharging: candidate.batteryCharging,
+    phaseVoltages: baselineModel.value.voltages,
+  });
   if (!model) return null;
-
-  if (candidateState.heatpump !== Number(current.heatpumpLevel)) {
-    model = applyCounterfactualProfilePower(model, 'heatpump', clampInt(candidateState.heatpump, 0, HEATPUMP_LEVELS));
-  }
-
-  if (candidateState.wallbox !== Number(current.wallboxMask)) {
-    model = applyCounterfactualProfilePower(model, 'wallbox', clampInt(candidateState.wallbox, 0, 3));
-  }
-
-  if (candidateState.batteryCharging !== (current.batteryCharging === true)) {
-    if (candidateState.batteryCharging) {
-      model = applyCounterfactualProfilePower(model, 'battery', 1);
-      model = modelWithBatteryCurrent(
-        model,
-        Number(_.controlPolicy.batteryPredictedOnCurrentA),
-        { fallbackToFull: true, preferMeasuredPq: false },
-      );
-    } else {
-      model = applyCounterfactualProfilePower(model, 'battery', 0);
-    }
-  }
 
   const result = PhasorCalculator.analyzeVUFIncrementalPQ({
     powers: model.powers,
@@ -1072,16 +703,18 @@ const applyAgentDeviceState = state => {
     const targetR0 = (targetWallbox & 1) !== 0;
     const targetR1 = (targetWallbox & 2) !== 0;
 
-    // Treat the two physical Shelly outputs as one logical Wallbox command.
-    // Confirm the model/agent mask only when the combined physical state
-    // reaches this target; intermediate relay states stay raw-only.
-    beginWallboxTarget(targetWallbox);
-
     // Keep the last confirmed Shelly state visible while a new command is in
     // flight. Do not set r0/r1 to null: that used to invalidate the global
-    // control gate until the next (sometimes >10 s delayed) Shelly status.
-    if (_.wallbox.r0 !== targetR0) runtime.WallboxService.set(0, targetR0);
-    if (_.wallbox.r1 !== targetR1) runtime.WallboxService.set(1, targetR1);
+    // control gate until the next Shelly status. For cross-mask transitions
+    // (e.g. logical Level 2 / mask 2 -> Level 1 / mask 1), issue OFF operations
+    // before ON operations (break-before-make) so a capacity derating action
+    // cannot transiently create mask 3 by turning the new relay on first.
+    const relayOps = [];
+    if (_.wallbox.r0 === true && targetR0 === false) relayOps.push([0, false]);
+    if (_.wallbox.r1 === true && targetR1 === false) relayOps.push([1, false]);
+    if (_.wallbox.r0 === false && targetR0 === true) relayOps.push([0, true]);
+    if (_.wallbox.r1 === false && targetR1 === true) relayOps.push([1, true]);
+    for (const [relay, on] of relayOps) runtime.WallboxService.set(relay, on);
   }
 
   if (own(state, 'batteryCharging')) {
@@ -1091,6 +724,10 @@ const applyAgentDeviceState = state => {
 
 const onAgentEnabledChange = enabled => {
   _.agent.enabled = enabled;
+};
+
+const onAgentStateChange = state => {
+  _.agent.state = String(state ?? 'inactive');
 };
 
 const calibrateCurrent = (value, offset) => {
@@ -1118,9 +755,8 @@ const onEnergyMeter = payload => {
 
   measured.source_type = 'measured';
 
-  // The measured snapshot is the shared physical source for the live-scaled
-  // Current Card and the current-state Wallbox/Battery P/Q -> VUF adapters.
-  // Candidate prediction and command completion still use logical device state.
+  // Building current is not produced by multiplying Shelly current. The actual
+  // projected values are computed from confirmed Branch-A/B/Battery state.
   const projected = {
     source_type: 'digital_twin_from_real_state',
     projection_model: 'pq_profile_scaled_to_building_capacity_v1',
@@ -1225,27 +861,10 @@ const onWallbox = data => {
   const output = boolOrNull(data?.output);
   if (data.id === 0 && output !== null) { _.wallbox.r0 = output; _.wallbox.r0Update = performance.now(); }
   else if (data.id === 1 && output !== null) { _.wallbox.r1 = output; _.wallbox.r1Update = performance.now(); }
-  else return;
 
-  const observedMask = rawWallboxMask.value;
-  if (observedMask === null) return;
-
-  if (_.wallbox.targetMask !== null) {
-    // Atomic command confirmation: mask1 -> mask2 is committed only after
-    // both relay reports together form mask2. Transient mask0/mask3 never
-    // becomes the AI/Digital-Twin device state.
-    if (observedMask === _.wallbox.targetMask) {
-      commitWallboxMask(observedMask);
-      _.wallbox.targetMask = null;
-      clearWallboxTargetTimer();
-      clearWallboxCommitTimer();
-    }
-    return;
+  if (_.wallbox.r0 !== null && _.wallbox.r1 !== null) {
+    _.wallbox.load = (_.wallbox.r0 ? 1 : 0) + (_.wallbox.r1 ? 2 : 0);
   }
-
-  // External/manual Shelly changes have no target metadata. Debounce the
-  // combined mask so two closely spaced relay updates are committed once.
-  scheduleExternalWallboxCommit();
 };
 
 const onBattery = data => {
@@ -1306,11 +925,17 @@ const cancelElectricalCalibration = async () => {
 };
 
 const toggleWallbox = r => {
-  if (!controlReady.value || _.wallbox.r0 === null || _.wallbox.r1 === null) return;
-  const nextR0 = r === 0 ? !_.wallbox.r0 : _.wallbox.r0;
-  const nextR1 = r === 1 ? !_.wallbox.r1 : _.wallbox.r1;
-  beginWallboxTarget(wallboxMaskFromRelays(nextR0, nextR1));
-  App.WallboxService.set(r, r === 0 ? nextR0 : nextR1);
+  if (!controlReady.value) return;
+  if (r === 0) {
+    if (_.wallbox.r0 === null) return;
+    const state = !_.wallbox.r0;
+    App.WallboxService.set(0, state);
+    return;
+  }
+
+  if (_.wallbox.r1 === null) return;
+  const state = !_.wallbox.r1;
+  App.WallboxService.set(1, state);
 };
 
 const updateHeatpumpLoad = value => {
@@ -1566,8 +1191,6 @@ onMounted(init);
 
 onUnmounted(() => {
   if (animationFrame) cancelAnimationFrame(animationFrame);
-  clearWallboxCommitTimer();
-  clearWallboxTargetTimer();
   unwatchConnection?.();
   unwatchConnection = null;
   unwatchStartupChecklist?.();
@@ -1600,12 +1223,12 @@ onUnmounted(() => {
     <div class="startup-panel" :class="_.startup.phase">
       <div class="startup-head">
         <div>
-          <strong>Startup Initialization</strong>
+          <strong>Startup Initialization / 首次进入初始化检查</strong>
           <p>{{ _.startup.message }}</p>
         </div>
         <div class="startup-actions">
           <span class="startup-badge">{{ startupStatusLabel }}</span>
-          <button type="button" @click="retryInitialization">RECHECK</button>
+          <button type="button" @click="retryInitialization">RECHECK / 重新检查</button>
         </div>
       </div>
       <div class="startup-checks">
@@ -1618,154 +1241,215 @@ onUnmounted(() => {
         <span :class="{ ok: startupChecklist.battery }">Battery {{ startupChecklist.battery ? '✓' : '…' }}</span>
       </div>
       <p v-if="startupActiveDevices.length > 0" class="startup-warning">
-        Active state found: {{ startupActiveDevices.join(' · ') }}. Browser startup does not send automatic STOP.
+        Active state found / 检测到设备处于运行状态: {{ startupActiveDevices.join(' · ') }}. Browser startup does not send automatic STOP.
       </p>
     </div>
 
-    <div class="grid-impedance-panel" :class="{ collapsed: !gridImpedanceOpen }">
+    <div class="grid-impedance-panel">
       <div class="grid-panel-head">
         <div>
-          <strong>Senergate Grid Impedance</strong>
-          <p v-if="gridImpedanceOpen">
-            MODELED building-scale feeder for the incremental P/Q Digital Twin. Hiding this panel changes only the UI; the active impedance values remain in the model.
+          <strong>Senergate Grid Impedance / Netzimpedanz / 电网阻抗</strong>
+          <p>
+            MODELED building-scale feeder for the incremental P/Q Digital Twin. The Weak-Grid Demo is explicitly non-site-calibrated; Branch A max and Branch B max are designed to create a visible >2.3% modeled VUF without applying a direct VUF multiplier.
+            / 增量 P/Q Digital Twin 使用建筑级馈线模型。Weak-Grid Demo 明确标注为非现场标定场景；Branch A 最大值和 Branch B 最大值都设计为自然产生 >2.3% 的模型 VUF，而不是直接给 VUF 乘倍率。
           </p>
         </div>
-        <div class="grid-panel-actions">
-          <span class="grid-provenance">{{ _.grid.provenance.toUpperCase() }}</span>
-          <button type="button" class="collapse-button" :aria-expanded="gridImpedanceOpen" @click="gridImpedanceOpen = !gridImpedanceOpen">
-            {{ gridImpedanceOpen ? 'HIDE' : 'SHOW' }}
-          </button>
-        </div>
+        <span class="grid-provenance">{{ _.grid.provenance.toUpperCase() }}</span>
       </div>
 
-      <div v-if="gridImpedanceOpen" class="grid-panel-content">
-        <div class="grid-preset-actions">
-          <span>Grid scenario:</span>
-          <button type="button" :class="{ selected: _.grid.preset === 'stiff' }" @click="setGridPreset('stiff')">Stiff LV</button>
-          <button type="button" :class="{ selected: _.grid.preset === 'typical' }" @click="setGridPreset('typical')">Typical Feeder</button>
-          <button type="button" :class="{ selected: _.grid.preset === 'weak' }" @click="setGridPreset('weak')">Weak Feeder</button>
-          <button type="button" :class="{ selected: _.grid.preset === 'demo' }" @click="setGridPreset('demo')">Weak-Grid Demo</button>
-          <span class="grid-name">{{ gridPresetLabel }}</span>
-        </div>
-
-        <div class="grid-parameter-grid">
-          <label :class="{ invalid: gridErrors.rPhase }"><span>R<sub>phase</sub> [Ω]</span><input type="text" inputmode="decimal" :value="gridDraft.rPhase" @input="onGridDraftInput('rPhase', $event)" @blur="commitGridField('rPhase')" @keydown.enter.prevent="commitGridField('rPhase')" /><small v-if="gridErrors.rPhase" class="input-error">{{ gridErrors.rPhase }}</small></label>
-          <label :class="{ invalid: gridErrors.xPhase }"><span>X<sub>phase</sub> [Ω]</span><input type="text" inputmode="decimal" :value="gridDraft.xPhase" @input="onGridDraftInput('xPhase', $event)" @blur="commitGridField('xPhase')" @keydown.enter.prevent="commitGridField('xPhase')" /><small v-if="gridErrors.xPhase" class="input-error">{{ gridErrors.xPhase }}</small></label>
-          <label :class="{ invalid: gridErrors.rNeutral }"><span>R<sub>N</sub> [Ω]</span><input type="text" inputmode="decimal" :value="gridDraft.rNeutral" @input="onGridDraftInput('rNeutral', $event)" @blur="commitGridField('rNeutral')" @keydown.enter.prevent="commitGridField('rNeutral')" /><small v-if="gridErrors.rNeutral" class="input-error">{{ gridErrors.rNeutral }}</small></label>
-          <label :class="{ invalid: gridErrors.xNeutral }"><span>X<sub>N</sub> [Ω]</span><input type="text" inputmode="decimal" :value="gridDraft.xNeutral" @input="onGridDraftInput('xNeutral', $event)" @blur="commitGridField('xNeutral')" @keydown.enter.prevent="commitGridField('xNeutral')" /><small v-if="gridErrors.xNeutral" class="input-error">{{ gridErrors.xNeutral }}</small></label>
-        </div>
-        <p class="grid-input-note">Manual entries: digits and "." only, maximum 2 decimal places, range 0.00–1.00 Ω. Built-in presets retain their original engineering precision.</p>
-
-        <div class="grid-derived">
-          <span>|Z<sub>phase</sub>| = {{ formatNullableNumber(phaseImpedanceMagnitude, 3, ' Ω') }}</span>
-          <span>|Z<sub>N</sub>| = {{ formatNullableNumber(neutralImpedanceMagnitude, 3, ' Ω') }}</span>
-          <span>|V<sub>N</sub>| = {{ neutralVoltageDropMagnitude !== null ? `${neutralVoltageDropMagnitude.toFixed(2)} V` : '--' }}</span>
-          <span>Incremental model: V<sub>PCC,proj</sub> = V<sub>PCC,OFF</sub> − Z<sub>phase</sub>ΔI − Z<sub>N</sub>ΔI<sub>N</sub></span>
-          <span>Branch A max 60 A · Branch B max 64 A · Battery max 40 A</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="site-limits-panel control-policy-panel" :class="{ collapsed: !siteLimitsOpen }">
-      <div class="control-policy-head">
-        <div>
-          <strong>Site Limits</strong>
-          <p v-if="siteLimitsOpen">0 = disabled. Values are site/connection/protection specific; they are not universal legal limits.</p>
-        </div>
-        <div class="control-policy-actions">
-          <span class="grid-provenance">{{ siteLimitsEnabled ? 'CONFIGURED' : 'DISABLED' }}</span>
-          <button type="button" class="collapse-button" :aria-expanded="siteLimitsOpen" @click="siteLimitsOpen = !siteLimitsOpen">
-            {{ siteLimitsOpen ? 'HIDE' : 'SHOW' }}
-          </button>
-        </div>
+      <div class="grid-preset-actions">
+        <span>Grid scenario:</span>
+        <button type="button" :class="{ selected: _.grid.preset === 'stiff' }" @click="setGridPreset('stiff')">Stiff LV</button>
+        <button type="button" :class="{ selected: _.grid.preset === 'typical' }" @click="setGridPreset('typical')">Typical Feeder</button>
+        <button type="button" :class="{ selected: _.grid.preset === 'weak' }" @click="setGridPreset('weak')">Weak Feeder</button>
+        <button type="button" :class="{ selected: _.grid.preset === 'demo' }" @click="setGridPreset('demo')">Weak-Grid Demo</button>
+        <span class="grid-name">{{ gridPresetLabel }}</span>
       </div>
 
-      <div v-if="siteLimitsOpen" class="control-policy-content">
-        <div class="grid-derived control-reference-row">
-          <span>German VDE symmetry reference: ≤ {{ (_.controlPolicy.deSinglePhaseSymmetryReferenceVA / 1000).toFixed(1) }} kVA ≈ {{ _.controlPolicy.deSinglePhaseSymmetryReferenceA }} A @ 230 V</span>
-          <span>NOT a total L1/L2/L3 load limit</span>
-          <span>Prototype engineering baseline: ≤ {{ (_.controlPolicy.prototypeEngineeringPowerLimitW / 1000).toFixed(1) }} kW · &lt;{{ _.controlPolicy.prototypeEngineeringCurrentGuideA }} A</span>
-        </div>
-
-        <div class="control-policy-grid two-columns">
-          <label :class="{ invalid: policyErrors.siteMaxTotalPowerW }">
-            <span>Maximum total power [W] · 0=OFF</span>
-            <input type="text" inputmode="decimal" :value="policyDraft.siteMaxTotalPowerW" @input="onPolicyDraftInput('siteMaxTotalPowerW', $event)" @blur="commitPolicyField('siteMaxTotalPowerW')" @keydown.enter.prevent="commitPolicyField('siteMaxTotalPowerW')" />
-            <small v-if="policyErrors.siteMaxTotalPowerW" class="input-error">{{ policyErrors.siteMaxTotalPowerW }}</small>
-          </label>
-          <label :class="{ invalid: policyErrors.siteMaxPhaseCurrentA }">
-            <span>Maximum phase current [A] · 0=OFF</span>
-            <input type="text" inputmode="decimal" :value="policyDraft.siteMaxPhaseCurrentA" @input="onPolicyDraftInput('siteMaxPhaseCurrentA', $event)" @blur="commitPolicyField('siteMaxPhaseCurrentA')" @keydown.enter.prevent="commitPolicyField('siteMaxPhaseCurrentA')" />
-            <small v-if="policyErrors.siteMaxPhaseCurrentA" class="input-error">{{ policyErrors.siteMaxPhaseCurrentA }}</small>
-          </label>
-        </div>
-
-        <div class="grid-derived">
-          <span>Measured total P: {{ measuredTotalPowerW !== null ? `${measuredTotalPowerW.toFixed(0)} W` : '--' }}</span>
-          <span>Headroom ratio: {{ siteHeadroomRatio !== null ? `${(siteHeadroomRatio * 100).toFixed(1)}%` : '--' }}</span>
-        </div>
+      <div class="grid-parameter-grid">
+        <label>
+          <span>R<sub>phase</sub> [Ω]</span>
+          <input v-model.number="_.grid.rPhase" type="number" min="0" max="1" step="0.005" @input="markGridCustom" />
+        </label>
+        <label>
+          <span>X<sub>phase</sub> [Ω]</span>
+          <input v-model.number="_.grid.xPhase" type="number" min="0" max="1" step="0.005" @input="markGridCustom" />
+        </label>
+        <label>
+          <span>R<sub>N</sub> [Ω]</span>
+          <input v-model.number="_.grid.rNeutral" type="number" min="0" max="1" step="0.005" @input="markGridCustom" />
+        </label>
+        <label>
+          <span>X<sub>N</sub> [Ω]</span>
+          <input v-model.number="_.grid.xNeutral" type="number" min="0" max="1" step="0.005" @input="markGridCustom" />
+        </label>
       </div>
-    </div>
 
-    <div class="control-policy-panel" :class="{ collapsed: !aiThresholdsOpen }">
-      <div class="control-policy-head">
-        <div>
-          <strong>AI Control Thresholds</strong>
-          <p v-if="aiThresholdsOpen">Editable fields use "." as decimal separator and accept at most 2 decimal places. Invalid drafts never change the active controller value.</p>
+      <div class="grid-derived">
+        <span>|Z<sub>phase</sub>| = {{ formatNullableNumber(phaseImpedanceMagnitude, 3, ' Ω') }}</span>
+        <span>|Z<sub>N</sub>| = {{ formatNullableNumber(neutralImpedanceMagnitude, 3, ' Ω') }}</span>
+        <span>|V<sub>N</sub>| = {{ neutralVoltageDropMagnitude !== null ? `${neutralVoltageDropMagnitude.toFixed(2)} V` : '--' }}</span>
+        <span>Incremental model: V<sub>PCC,proj</sub> = V<sub>PCC,OFF</sub> − Z<sub>phase</sub>ΔI − Z<sub>N</sub>ΔI<sub>N</sub></span>
+        <span>Branch A: 1 motor → building equivalent · max 60 A</span>
+        <span>Branch B: 1 relay → 2 WB · 2 relays → 4 WB · max 64 A</span>
+        <span>Battery: building equivalent · max 40 A</span>
+      </div>
+
+
+
+      <div class="control-policy-panel">
+        <button
+          type="button"
+          class="capacity-summary"
+          :class="`capacity-${capacityState.key}`"
+          :aria-expanded="capacityPanelExpanded"
+          @click="capacityPanelExpanded = !capacityPanelExpanded"
+        >
+          <span class="capacity-summary-title">Capacity</span>
+          <strong>{{ capacityUsagePercent !== null ? `${capacityUsagePercent.toFixed(1)}%` : '--' }}</strong>
+          <span>Headroom {{ remainingHeadroomPercent !== null ? `${remainingHeadroomPercent.toFixed(1)}%` : '--' }}</span>
+          <span>{{ limitingCapacityMetric ? `Limit: ${limitingCapacityMetric.label}` : 'Limits: OFF' }}</span>
+          <span class="capacity-state-badge">{{ capacityState.label }}</span>
+          <span class="capacity-chevron">{{ capacityPanelExpanded ? '▲' : '▼' }}</span>
+        </button>
+
+        <div v-if="capacityPanelExpanded" class="capacity-details">
+          <div class="capacity-kpis">
+            <div>
+              <span>Capacity Usage</span>
+              <strong>{{ capacityUsagePercent !== null ? `${capacityUsagePercent.toFixed(1)}%` : '--' }}</strong>
+            </div>
+            <div>
+              <span>Remaining Headroom</span>
+              <strong>{{ remainingHeadroomPercent !== null ? `${remainingHeadroomPercent.toFixed(1)}%` : '--' }}</strong>
+            </div>
+            <div>
+              <span>Limiting Constraint</span>
+              <strong>{{ limitingCapacityMetric?.label ?? '--' }}</strong>
+            </div>
+            <div>
+              <span>State</span>
+              <strong>{{ capacityState.label }}</strong>
+            </div>
+          </div>
+
+          <div class="capacity-metric-table">
+            <div class="capacity-metric-row capacity-metric-head">
+              <span>Metric</span><span>Actual</span><span>100% Limit</span><span>Usage</span>
+            </div>
+            <div v-for="metric in capacityMetrics" :key="metric.key" class="capacity-metric-row" :class="{ limiting: metric.key === limitingCapacityMetric?.key }">
+              <span>{{ metric.label }}</span>
+              <span>{{ formatCapacityValue(metric.actual, metric.unit) }}</span>
+              <span>{{ formatCapacityValue(metric.limit, metric.unit) }}</span>
+              <strong>{{ `${(metric.ratio * 100).toFixed(1)}%` }}</strong>
+            </div>
+            <div v-if="capacityMetrics.length === 0" class="capacity-empty">
+              Capacity hard limits are disabled (0). Existing runtime behaviour is not restricted by Capacity Supervisor.
+            </div>
+          </div>
+
+          <div class="grid-derived capacity-reference-row">
+            <span>100% Capacity = configured site hard limit (connection / main protection / cable-device design / local DSO-TAB)</span>
+            <span>80/90/95% = Senergate engineering Warning / Pre-Limit / Critical margins</span>
+            <span>DE symmetry reference {{ (_.controlPolicy.deSinglePhaseSymmetryReferenceVA / 1000).toFixed(1) }} kVA ≈ {{ _.controlPolicy.deSinglePhaseSymmetryReferenceA }} A @230 V is NOT a total phase-capacity limit</span>
+            <span>Prototype internal reference ≤ {{ (_.controlPolicy.prototypeEngineeringPowerLimitW / 1000).toFixed(1) }} kW · &lt;{{ _.controlPolicy.prototypeEngineeringCurrentGuideA }} A; not enforced unless configured as a site limit</span>
+          </div>
         </div>
-        <div class="control-policy-actions">
+
+        <div class="control-policy-head">
+          <div>
+            <strong>AI Control Thresholds / Regler-Schwellen / AI 控制阈值</strong>
+            <p>
+              Site hard limits use 0 = disabled. Capacity Usage is calculated from the maximum active P/L1/L2/L3 utilization.
+              / 现场硬限制以 0=禁用；Capacity Usage 取总功率及 L1/L2/L3 各有效利用率中的最大值。
+            </p>
+          </div>
           <span class="grid-provenance">{{ _.controlPolicy.strategy.toUpperCase() }}</span>
-          <button type="button" class="collapse-button" :aria-expanded="aiThresholdsOpen" @click="aiThresholdsOpen = !aiThresholdsOpen">
-            {{ aiThresholdsOpen ? 'HIDE' : 'SHOW' }}
-          </button>
         </div>
-      </div>
 
-      <div v-if="aiThresholdsOpen" class="control-policy-content">
         <div class="control-policy-grid">
-          <label :class="{ invalid: policyErrors.vufEnterPct }">
-            <span>VUF Enter [%]</span>
-            <input type="text" inputmode="decimal" :value="policyDraft.vufEnterPct" @input="onPolicyDraftInput('vufEnterPct', $event)" @blur="commitPolicyField('vufEnterPct')" @keydown.enter.prevent="commitPolicyField('vufEnterPct')" />
-            <small v-if="policyErrors.vufEnterPct" class="input-error">{{ policyErrors.vufEnterPct }}</small>
+          <label>
+            <span>Site max total power [W] · 0=OFF</span>
+            <input v-model.number="_.controlPolicy.siteMaxTotalPowerW" type="number" min="0" step="100" />
           </label>
-          <label :class="{ invalid: policyErrors.vufExitPct }">
-            <span>VUF Exit [%]</span>
-            <input type="text" inputmode="decimal" :value="policyDraft.vufExitPct" @input="onPolicyDraftInput('vufExitPct', $event)" @blur="commitPolicyField('vufExitPct')" @keydown.enter.prevent="commitPolicyField('vufExitPct')" />
-            <small v-if="policyErrors.vufExitPct" class="input-error">{{ policyErrors.vufExitPct }}</small>
+          <label>
+            <span>Site max L1 current [A] · 0=OFF</span>
+            <input v-model.number="_.controlPolicy.siteMaxCurrentL1A" type="number" min="0" step="0.1" />
           </label>
-          <label :class="{ invalid: policyErrors.batteryPredictedOnCurrentA }">
-            <span>Battery predicted ON current [A]</span>
-            <input type="text" inputmode="decimal" :value="policyDraft.batteryPredictedOnCurrentA" @input="onPolicyDraftInput('batteryPredictedOnCurrentA', $event)" @blur="commitPolicyField('batteryPredictedOnCurrentA')" @keydown.enter.prevent="commitPolicyField('batteryPredictedOnCurrentA')" />
-            <small v-if="policyErrors.batteryPredictedOnCurrentA" class="input-error">{{ policyErrors.batteryPredictedOnCurrentA }}</small>
+          <label>
+            <span>Site max L2 current [A] · 0=OFF</span>
+            <input v-model.number="_.controlPolicy.siteMaxCurrentL2A" type="number" min="0" step="0.1" />
           </label>
-          <label :class="{ invalid: policyErrors.batteryEffectiveMinA }">
-            <span>Battery effective minimum [A]</span>
-            <input type="text" inputmode="decimal" :value="policyDraft.batteryEffectiveMinA" @input="onPolicyDraftInput('batteryEffectiveMinA', $event)" @blur="commitPolicyField('batteryEffectiveMinA')" @keydown.enter.prevent="commitPolicyField('batteryEffectiveMinA')" />
-            <small v-if="policyErrors.batteryEffectiveMinA" class="input-error">{{ policyErrors.batteryEffectiveMinA }}</small>
+          <label>
+            <span>Site max L3 current [A] · 0=OFF</span>
+            <input v-model.number="_.controlPolicy.siteMaxCurrentL3A" type="number" min="0" step="0.1" />
+          </label>
+          <label>
+            <span>Battery effective min [A]</span>
+            <input v-model.number="_.controlPolicy.batteryEffectiveMinA" type="number" min="0" max="5" step="0.01" />
+          </label>
+          <label>
+            <span>Heatpump adjustability [1–100]</span>
+            <input v-model.number="_.controlPolicy.heatpumpAdjustability" type="number" min="1" max="100" step="1" />
+            <small>AI minimum: {{ heatpumpMinAllowedLabel }}</small>
+          </label>
+          <label>
+            <span>Wallbox adjustability [1–100]</span>
+            <input v-model.number="_.controlPolicy.wallboxAdjustability" type="number" min="1" max="100" step="1" />
+            <small>AI minimum: {{ wallboxMinAllowedLabel }}</small>
+          </label>
+          <label>
+            <span>VUF enter [%]</span>
+            <input v-model.number="_.controlPolicy.vufEnterPct" type="number" min="0" max="10" step="0.1" />
+          </label>
+          <label>
+            <span>VUF exit [%]</span>
+            <input v-model.number="_.controlPolicy.vufExitPct" type="number" min="0" max="10" step="0.1" />
+          </label>
+          <label>
+            <span>Warning ratio</span>
+            <input v-model.number="_.controlPolicy.warningRatio" type="number" min="0" max="1" step="0.01" />
+          </label>
+          <label>
+            <span>Pre-limit ratio</span>
+            <input v-model.number="_.controlPolicy.preLimitRatio" type="number" min="0" max="1" step="0.01" />
+          </label>
+          <label>
+            <span>Critical ratio</span>
+            <input v-model.number="_.controlPolicy.criticalRatio" type="number" min="0" max="1" step="0.01" />
+          </label>
+          <label>
+            <span>Hard ratio · fixed</span>
+            <input :value="_.controlPolicy.hardRatio" type="number" readonly />
           </label>
         </div>
 
         <div class="grid-derived">
-          <span>Battery OFF→ON prediction: {{ Number(_.controlPolicy.batteryPredictedOnCurrentA).toFixed(2) }} A prototype</span>
+          <span>Capacity guard: {{ siteLimitsEnabled ? 'CONFIGURED' : 'DISABLED (original capacity behaviour preserved)' }}</span>
+          <span>Measured total P: {{ measuredTotalPowerW !== null ? `${measuredTotalPowerW.toFixed(0)} W` : '--' }}</span>
+          <span>Capacity Usage: {{ capacityUsagePercent !== null ? `${capacityUsagePercent.toFixed(1)}%` : '--' }}</span>
           <span>Battery measured ΔI: {{ batteryMeasuredCurrentA !== null ? `${batteryMeasuredCurrentA.toFixed(2)} A` : '--' }}</span>
-          <span>Internal headroom pre-limit: 90% · hard: 100%</span>
-          <span>Battery ramp: min 3 s · stable ΔI ≤0.02 A ×3 · max 10 s</span>
         </div>
       </div>
-    </div>
 
-    <div class="electrical-profile-row">
-      <div class="electrical-profile-info">
-        <span class="profile-badge" :class="{ calibrated: electricalProfileSummary.calibrated, running: _.electricalModel.calibration.running }">{{ calibrationStatusLabel }}</span>
-        <span>P/Q profile: {{ electricalProfileSummary.provenance }}</span>
-        <span>Baseline: {{ baselineModel.source }}</span>
-        <span v-if="electricalProfileSummary.generatedAt">Profile time: {{ electricalProfileSummary.generatedAt }}</span>
-        <span class="voltage-guard" :class="{ safe: voltagePredictionSafe, unsafe: !voltagePredictionSafe }">Voltage guard 207–253 V: {{ voltagePredictionSafe ? 'SAFE' : 'VIOLATED' }}</span>
-      </div>
-      <div class="calibration-actions">
-        <button v-if="!_.electricalModel.calibration.running" type="button" :disabled="!startupDataVisible || _.agent.enabled" @click="runElectricalCalibration">CALIBRATE P/Q · REAL HARDWARE</button>
-        <button v-else type="button" class="cancel" @click="cancelElectricalCalibration">CANCEL CALIBRATION</button>
-        <small>{{ calibrationProgressText || 'OFF baseline + HP 10/20/30/40/50 Hz + WB masks 1/2/3 + Battery ON' }}</small>
+      <div class="electrical-profile-row">
+        <div class="electrical-profile-info">
+          <span class="profile-badge" :class="{ calibrated: electricalProfileSummary.calibrated, running: _.electricalModel.calibration.running }">{{ calibrationStatusLabel }}</span>
+          <span>P/Q profile: {{ electricalProfileSummary.provenance }}</span>
+          <span>Baseline: {{ baselineModel.source }}</span>
+          <span v-if="electricalProfileSummary.generatedAt">Profile time: {{ electricalProfileSummary.generatedAt }}</span>
+          <span class="voltage-guard" :class="{ safe: voltagePredictionSafe, unsafe: !voltagePredictionSafe }">Voltage guard 207–253 V: {{ voltagePredictionSafe ? 'SAFE' : 'VIOLATED' }}</span>
+        </div>
+        <div class="calibration-actions">
+          <button
+            v-if="!_.electricalModel.calibration.running"
+            type="button"
+            :disabled="!startupDataVisible || _.agent.enabled"
+            @click="runElectricalCalibration"
+          >CALIBRATE P/Q · REAL HARDWARE</button>
+          <button v-else type="button" class="cancel" @click="cancelElectricalCalibration">CANCEL CALIBRATION</button>
+          <small>{{ calibrationProgressText || 'OFF baseline + HP 10/20/30/40/50 Hz + WB masks 1/2/3 + Battery ON' }}</small>
+        </div>
       </div>
     </div>
 
@@ -1782,7 +1466,7 @@ onUnmounted(() => {
         :angles="displayPhasorAngles"
       />
 
-      <VufCard :vuf="displayCurrentVuf" :baseline-vuf="displayBaselineVuf" :load-impact-vuf="displayLoadImpactVuf" :sample-ts="_.energy_meter.lastUpdate" />
+      <VufCard :vuf="displayCurrentVuf" :baseline-vuf="displayBaselineVuf" :load-impact-vuf="displayLoadImpactVuf" :critical-unresolved="_.agent.state === 'critical_unresolved'" />
     </div>
 
     <div class="agent-section">
@@ -1797,11 +1481,11 @@ onUnmounted(() => {
         :measured-currents="measuredCurrents"
         :measured-total-power-w="measuredTotalPowerW"
         :battery-measured-current-a="batteryMeasuredCurrentA"
-        :battery-measurement-token="_.energy_meter.lastUpdate"
         @apply-state="applyAgentDeviceState"
         @heatpump-zero-hold="requestHeatpumpZeroHold"
         @heatpump-stop="requestHeatpumpStop"
         @enabled-change="onAgentEnabledChange"
+        @state-change="onAgentStateChange"
       />
     </div>
 
@@ -1820,5 +1504,6 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.control-policy-panel{margin-top:12px;padding:12px;border:1px solid #284b60;border-radius:12px;background:#081721}.control-policy-panel.collapsed{padding-bottom:12px}.control-policy-actions{display:flex;align-items:center;gap:8px}.control-policy-content{margin-top:0}.control-policy-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.control-policy-head strong{font-size:11px}.control-policy-head p{margin:4px 0 0;color:#789aac;font-size:9px;line-height:1.45}.control-policy-grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-top:10px}.control-policy-grid.two-columns{grid-template-columns:repeat(2,minmax(180px,1fr))}.control-policy-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.control-policy-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.control-policy-grid label.invalid input{border-color:#ff5c6c;box-shadow:0 0 0 1px rgba(255,92,108,.18)}.input-error{color:#ff8c97;font-size:8px;line-height:1.35}.control-reference-row span:first-child{border-color:#665c2d;color:#ffe795}@media(max-width:1100px){.control-policy-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}@media(max-width:700px){.control-policy-head{flex-direction:column}.control-policy-grid{grid-template-columns:1fr}}.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-impedance-panel.collapsed{padding-bottom:14px}.grid-panel-actions{display:flex;align-items:center;gap:8px}.collapse-button{padding:6px 10px;border:1px solid #284b60;border-radius:999px;background:#081721;color:#a7c8d8;cursor:pointer;font-size:9px;font-weight:700;letter-spacing:.08em}.collapse-button:hover{border-color:#58e7ff;color:#eaf6ff}.site-limits-panel{margin-top:12px}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-parameter-grid label.invalid input{border-color:#ff5c6c;box-shadow:0 0 0 1px rgba(255,92,108,.18)}.grid-input-note{margin:7px 0 0;color:#6f91a3;font-size:8px;line-height:1.4}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.electrical-profile-row{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-top:12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#081721}.electrical-profile-info{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#789aac;font-size:9px}.profile-badge,.voltage-guard{padding:5px 7px;border:1px solid #665c2d;border-radius:999px;color:#ffe795}.profile-badge.calibrated{border-color:#2b6f62;color:#8ff1c3}.profile-badge.running{border-color:#58e7ff;color:#58e7ff}.voltage-guard.safe{border-color:#2b6f62;color:#8ff1c3}.voltage-guard.unsafe{border-color:#6b3740;color:#ff8c97}.calibration-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.calibration-actions button{padding:7px 9px;border:1px solid #58e7ff;border-radius:8px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:9px;font-weight:700}.calibration-actions button.cancel{border-color:#6b3740;color:#ff9ba4}.calibration-actions button:disabled{cursor:not-allowed;opacity:.45}.calibration-actions small{max-width:420px;color:#6f91a3;font-size:8px}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.electrical-profile-row{flex-direction:column;align-items:flex-start}.calibration-actions{justify-content:flex-start}.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
+.capacity-summary{width:100%;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:9px 11px;border:1px solid #284b60;border-radius:10px;background:#07131d;color:#b9d6e5;cursor:pointer;text-align:left}.capacity-summary-title{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#789aac}.capacity-summary strong{font-size:14px;color:#eaf6ff}.capacity-summary span:not(.capacity-summary-title):not(.capacity-chevron):not(.capacity-state-badge){font-size:10px;color:#8daec0}.capacity-state-badge{margin-left:auto;padding:4px 7px;border:1px solid #36556a;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.06em}.capacity-chevron{font-size:10px;color:#789aac}.capacity-summary.capacity-warning{border-color:#665c2d}.capacity-summary.capacity-warning .capacity-state-badge{border-color:#665c2d;color:#ffe795}.capacity-summary.capacity-prelimit{border-color:#8f6a2c}.capacity-summary.capacity-prelimit .capacity-state-badge{border-color:#8f6a2c;color:#ffd166}.capacity-summary.capacity-critical,.capacity-summary.capacity-hard{border-color:#6b3740}.capacity-summary.capacity-critical .capacity-state-badge,.capacity-summary.capacity-hard .capacity-state-badge{border-color:#6b3740;color:#ff9ba4}.capacity-summary.capacity-normal .capacity-state-badge{border-color:#2b6f62;color:#8ff1c3}.capacity-details{margin:-4px 0 12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#061019}.capacity-kpis{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px}.capacity-kpis>div{display:grid;gap:3px;padding:8px;border:1px solid #17384b;border-radius:8px;background:#081721}.capacity-kpis span{color:#789aac;font-size:9px}.capacity-kpis strong{font-size:12px}.capacity-metric-table{margin-top:9px;border:1px solid #17384b;border-radius:8px;overflow:hidden}.capacity-metric-row{display:grid;grid-template-columns:1.4fr 1fr 1fr .8fr;gap:8px;padding:7px 9px;border-bottom:1px solid #123042;color:#9db7c5;font-size:9px}.capacity-metric-row:last-child{border-bottom:0}.capacity-metric-head{color:#6f91a3;background:#07131d;font-weight:700}.capacity-metric-row.limiting{background:rgba(255,209,102,.06);color:#ffe795}.capacity-empty{padding:10px;color:#789aac;font-size:9px}.capacity-reference-row{margin-top:9px}.control-policy-grid small{color:#6f91a3;font-size:8px}.control-policy-grid input[readonly]{opacity:.65;cursor:not-allowed}.capacity-disabled .capacity-state-badge{color:#789aac}.control-policy-head{margin-top:2px}@media(max-width:900px){.capacity-kpis{grid-template-columns:repeat(2,minmax(120px,1fr))}}@media(max-width:600px){.capacity-kpis{grid-template-columns:1fr}.capacity-metric-row{grid-template-columns:1.2fr 1fr 1fr .8fr;font-size:8px}.capacity-state-badge{margin-left:0}}
+.control-policy-panel{margin-top:12px;padding:12px;border:1px solid #284b60;border-radius:12px;background:#081721}.control-policy-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.control-policy-head strong{font-size:11px}.control-policy-head p{margin:4px 0 0;color:#789aac;font-size:9px;line-height:1.45}.control-policy-grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-top:10px}.control-policy-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.control-policy-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.control-reference-row span:first-child{border-color:#665c2d;color:#ffe795}@media(max-width:1100px){.control-policy-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}@media(max-width:700px){.control-policy-head{flex-direction:column}.control-policy-grid{grid-template-columns:1fr}}.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.electrical-profile-row{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-top:12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#081721}.electrical-profile-info{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#789aac;font-size:9px}.profile-badge,.voltage-guard{padding:5px 7px;border:1px solid #665c2d;border-radius:999px;color:#ffe795}.profile-badge.calibrated{border-color:#2b6f62;color:#8ff1c3}.profile-badge.running{border-color:#58e7ff;color:#58e7ff}.voltage-guard.safe{border-color:#2b6f62;color:#8ff1c3}.voltage-guard.unsafe{border-color:#6b3740;color:#ff8c97}.calibration-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.calibration-actions button{padding:7px 9px;border:1px solid #58e7ff;border-radius:8px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:9px;font-weight:700}.calibration-actions button.cancel{border-color:#6b3740;color:#ff9ba4}.calibration-actions button:disabled{cursor:not-allowed;opacity:.45}.calibration-actions small{max-width:420px;color:#6f91a3;font-size:8px}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.electrical-profile-row{flex-direction:column;align-items:flex-start}.calibration-actions{justify-content:flex-start}.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
 </style>

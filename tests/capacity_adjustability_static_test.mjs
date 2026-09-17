@@ -1,0 +1,25 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const config = fs.readFileSync(new URL('../client/src/ControlPolicyConfig.js', import.meta.url), 'utf8');
+const dash = fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue', import.meta.url), 'utf8');
+const agent = fs.readFileSync(new URL('../client/src/components/AgentCard.vue', import.meta.url), 'utf8');
+const vuf = fs.readFileSync(new URL('../client/src/components/VufCard.vue', import.meta.url), 'utf8');
+const rules = fs.readFileSync(new URL('../client/src/CapacitySupervisor.js', import.meta.url), 'utf8');
+
+assert.match(config, /siteMaxCurrentL1A:\s*0/);
+assert.match(config, /siteMaxCurrentL2A:\s*0/);
+assert.match(config, /siteMaxCurrentL3A:\s*0/);
+assert.match(config, /heatpumpAdjustability:\s*50/);
+assert.match(config, /wallboxAdjustability:\s*30/);
+assert.match(rules, /Math\.ceil\(percent \/ 20\)/);
+assert.match(rules, /percent >= 91/);
+assert.match(agent, /current\.wallbox - 1/);
+assert.match(agent, /critical_unresolved/);
+assert.match(agent, /headroom_battery_release/);
+assert.match(dash, /Capacity Usage/);
+assert.match(dash, /Remaining Headroom/);
+assert.match(dash, /100% Limit/);
+assert.match(dash, /capacityPanelExpanded/);
+assert.match(dash, /senergate\.capacityPanelExpanded/);
+assert.match(vuf, /critical-unresolved-blink/);
+console.log('capacity_adjustability_static_test: OK');

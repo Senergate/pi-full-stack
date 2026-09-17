@@ -1,0 +1,14 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const dash = fs.readFileSync(new URL('../client/src/components/SimpleDashboard.vue', import.meta.url), 'utf8');
+const agent = fs.readFileSync(new URL('../client/src/components/AgentCard.vue', import.meta.url), 'utf8');
+const rules = fs.readFileSync(new URL('../client/src/CapacitySupervisor.js', import.meta.url), 'utf8');
+assert.match(rules, /sort\(\(a, b\) => b\.ratio - a\.ratio\)\[0\]/);
+assert.match(rules, /Math\.max\(0, 1 - usageRatio\)/);
+assert.match(dash, /siteMaxTotalPowerW/);
+assert.match(dash, /siteMaxCurrentL1A/);
+assert.match(dash, /siteMaxCurrentL2A/);
+assert.match(dash, /siteMaxCurrentL3A/);
+assert.match(agent, /phaseCurrentLimitA/);
+assert.match(agent, /headroomRatio\.value >= preLimitRatio\.value/);
+console.log('capacity_formula_static_test: OK');
