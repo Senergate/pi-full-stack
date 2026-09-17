@@ -5,7 +5,7 @@ import { heatpumpAdjustabilityRule, wallboxAdjustabilityRule } from '../client/s
 const agent = fs.readFileSync(new URL('../client/src/components/AgentCard.vue', import.meta.url), 'utf8');
 const config = fs.readFileSync(new URL('../client/src/ControlPolicyConfig.js', import.meta.url), 'utf8');
 
-assert.match(config, /battery_priority_capacity_monotonic_downshift_v3/);
+assert.match(config, /battery_priority_capacity_monotonic_downshift_v4_headroom_patch/);
 assert.deepEqual(heatpumpAdjustabilityRule(90), { percent: 90, locked: false, minLevel: 5 });
 assert.deepEqual(heatpumpAdjustabilityRule(91), { percent: 91, locked: true, minLevel: null });
 assert.deepEqual(wallboxAdjustabilityRule(90), { percent: 90, locked: false, minLevel: 2 });

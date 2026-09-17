@@ -13,7 +13,7 @@
  */
 
 export const CONTROL_POLICY_DEFAULTS = Object.freeze({
-  strategy: 'battery_priority_capacity_monotonic_downshift_v3',
+  strategy: 'battery_priority_capacity_monotonic_downshift_v4_headroom_patch',
 
   // VUF-only first implementation. CUF/Schieflast control is intentionally
   // deferred to a later architecture revision.
@@ -71,8 +71,8 @@ export const CONTROL_POLICY_DEFAULTS = Object.freeze({
 });
 
 // Real prototype current measurements supplied on 2026-09-15 (±0.01 A).
-// These are used only for action-relief ranking in the recommended controller;
-// they do not replace calibrated P/Q profiles.
+// These prototype measurements are retained as physical-reference data;
+// Building-Capacity action ranking uses Building-Twin MODELED relief instead.
 export const PROTOTYPE_CURRENT_CURVES_A = Object.freeze({
   heatpump: Object.freeze({ 0: 0.00, 1: 0.09, 2: 0.16, 3: 0.21, 4: 0.24, 5: 0.26 }),
   wallbox: Object.freeze({ 0: 0.00, 1: 0.14, 2: 0.30, 3: 0.42 }),

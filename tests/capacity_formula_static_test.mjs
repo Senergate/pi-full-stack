@@ -10,5 +10,6 @@ assert.match(dash, /siteMaxCurrentL1A/);
 assert.match(dash, /siteMaxCurrentL2A/);
 assert.match(dash, /siteMaxCurrentL3A/);
 assert.match(agent, /phaseCurrentLimitA/);
-assert.match(agent, /headroomRatio\.value >= preLimitRatio\.value/);
+assert.match(agent, /capacityUsageRatio\.value >= preLimitRatio\.value/);
+assert.match(agent, /const capacityNeedsAction/);
 console.log('capacity_formula_static_test: OK');

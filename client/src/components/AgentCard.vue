@@ -10,7 +10,7 @@
         <span class="toggle-track"><span class="toggle-knob" /></span>
         <span>
           <strong>{{ autoEnabled ? 'AI CONTROL ON' : 'AI CONTROL OFF' }}</strong>
-          <small>{{ autoEnabled ? 'Battery-priority VUF control · HP/WB downshift-only · voltage/headroom guards' : 'Operator control' }}</small>
+          <small>{{ autoEnabled ? 'Battery-priority VUF + Building Capacity · HP/WB downshift-only · voltage guard' : 'Operator control' }}</small>
         </span>
       </button>
     </div>
@@ -44,7 +44,7 @@
 
         <div v-if="agentState === 'adjusting'" class="cooldown">
           <div class="cooldown-label">
-            <span>Next VUF check</span>
+            <span>Next control check</span>
             <strong>{{ cooldownRemaining.toFixed(1) }} s</strong>
           </div>
           <div class="cooldown-track">
@@ -165,7 +165,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { classifyVuf, formatVufPercent } from '../VufPresentation.js';
-import { CONTROL_POLICY_DEFAULTS, PROTOTYPE_CURRENT_CURVES_A, resolveControlPolicyThresholds } from '../ControlPolicyConfig.js';
+import { CONTROL_POLICY_DEFAULTS, resolveControlPolicyThresholds } from '../ControlPolicyConfig.js';
 import { heatpumpAdjustabilityRule, phaseCurrentLimitA, wallboxAdjustabilityRule } from '../CapacitySupervisor.js';
 import { classifyBatteryEffectiveness } from '../MeasurementValidity.js';
 
@@ -243,6 +243,7 @@ const vufEnterPct = computed(() => resolvedThresholds.value.vufEnterPct);
 const vufExitPct = computed(() => resolvedThresholds.value.vufExitPct);
 const batteryEffectiveMinA = computed(() => policyNumber('batteryEffectiveMinA', CONTROL_POLICY_DEFAULTS.batteryEffectiveMinA));
 const preLimitRatio = computed(() => resolvedThresholds.value.preLimitRatio);
+const criticalRatio = computed(() => resolvedThresholds.value.criticalRatio);
 const hardRatio = computed(() => resolvedThresholds.value.hardRatio);
 const minImprovement = computed(() => policyNumber('minVufImprovementPct', CONTROL_POLICY_DEFAULTS.minVufImprovementPct));
 
@@ -259,7 +260,7 @@ const wallboxLocked = computed(() => wallboxAdjustabilityState.value.locked);
 const heatpumpMinAllowedLevel = computed(() => heatpumpAdjustabilityState.value.minLevel);
 const wallboxMinAllowedLevel = computed(() => wallboxAdjustabilityState.value.minLevel);
 
-const headroomRatio = computed(() => {
+const capacityUsageRatio = computed(() => {
   // Capacity/Headroom is a Building-Twin control KPI. Configured building
   // limits are compared with MODELED building values; prototype MEASURED
   // currents remain reserved for physical-reference/safety semantics.
@@ -277,7 +278,13 @@ const headroomRatio = computed(() => {
   }
   return ratios.length > 0 ? Math.max(...ratios) : null;
 });
-const siteLimitGuardEnabled = computed(() => headroomRatio.value !== null);
+// Backward-compatible alias for existing display/tests; semantically this is
+// capacity usage, not remaining headroom.
+const headroomRatio = capacityUsageRatio;
+const siteLimitGuardEnabled = computed(() => capacityUsageRatio.value !== null);
+const capacityNeedsAction = computed(() =>
+  siteLimitGuardEnabled.value && capacityUsageRatio.value >= preLimitRatio.value
+);
 const batteryEffectiveness = computed(() => classifyBatteryEffectiveness({
   charging: normalizedDeviceStates.value.batteryCharging,
   deltaCurrentA: props.batteryMeasuredCurrentA,
@@ -410,7 +417,7 @@ const agentStateDescription = computed(() => {
   if (agentState.value === 'pending') return 'A control command is waiting for physical execution feedback.';
   if (agentState.value === 'adjusting') return 'Execution confirmed. Waiting for the configured post-action settling window.';
   if (agentState.value === 'critical_unresolved') return 'VUF remains critical and no permitted Battery/Heatpump/Wallbox action can resolve it inside the configured adjustability limits.';
-  return 'Battery-priority VUF control is monitoring raw model-estimated VUF. CUF/Schieflast control is intentionally deferred.';
+  return 'Battery-priority VUF control and Building-Capacity supervision are monitoring the current model state. CUF/Schieflast control is intentionally deferred.';
 });
 
 const predictCandidate = async state => {
@@ -422,17 +429,30 @@ const predictCandidate = async state => {
   // the voltage window is a hard feasibility constraint, not a second score.
   if (typeof predictionResult === 'number') {
     return Number.isFinite(predictionResult)
-      ? { state, vuf: predictionResult, voltageSafe: true, voltages: null }
+      ? {
+          state,
+          vuf: predictionResult,
+          voltageSafe: true,
+          voltages: null,
+          capacityUsageRatio: null,
+          capacityLimitingMetric: null,
+        }
       : null;
   }
 
   const numeric = Number(predictionResult.vuf);
   if (!Number.isFinite(numeric)) return null;
+  const predictedCapacity = predictionResult.capacityUsageRatio;
   return {
     state,
     vuf: numeric,
     voltageSafe: predictionResult.voltageSafe === true,
     voltages: predictionResult.voltages ?? null,
+    capacityUsageRatio:
+      predictedCapacity === null || predictedCapacity === undefined || predictedCapacity === ''
+        ? null
+        : (Number.isFinite(Number(predictedCapacity)) ? Number(predictedCapacity) : null),
+    capacityLimitingMetric: predictionResult.capacityLimitingMetric ?? null,
   };
 };
 
@@ -481,25 +501,6 @@ const actionDelta = (current, candidate) => {
   return changed.length === 1 ? changed[0] : null;
 };
 
-const prototypeCurrentFor = (key, value) => {
-  if (key === 'heatpump') return PROTOTYPE_CURRENT_CURVES_A.heatpump[value] ?? 0;
-  if (key === 'wallbox') return PROTOTYPE_CURRENT_CURVES_A.wallbox[value] ?? 0;
-  if (key === 'batteryCharging') {
-    if (!value) return 0;
-    const current = Number(props.batteryMeasuredCurrentA);
-    return Number.isFinite(current) ? Math.max(0, current) : 0;
-  }
-  return 0;
-};
-
-const prototypeReliefA = (current, candidate) => {
-  let relief = 0;
-  for (const key of ['heatpump', 'wallbox', 'batteryCharging']) {
-    relief += prototypeCurrentFor(key, current[key]) - prototypeCurrentFor(key, candidate[key]);
-  }
-  return relief;
-};
-
 const dedupeStates = candidates => {
   const unique = [];
   const seen = new Set();
@@ -524,6 +525,22 @@ const evaluateCandidates = async candidates => {
       addLog('Candidate rejected by voltage guard', `Predicted VUF ${formatVuf(result.vuf)} but phase voltage would leave 207–253 V (${values}).`, 'warning');
       continue;
     }
+    const batteryTurnsOn =
+      normalizedDeviceStates.value.batteryCharging !== true &&
+      candidate.batteryCharging === true;
+    if (
+      batteryTurnsOn &&
+      siteLimitGuardEnabled.value &&
+      result.capacityUsageRatio !== null &&
+      result.capacityUsageRatio >= hardRatio.value
+    ) {
+      addLog(
+        'Battery candidate rejected by capacity guard',
+        `Predicted Building Capacity ${(result.capacityUsageRatio * 100).toFixed(1)}% reaches/exceeds the configured hard limit.`,
+        'warning'
+      );
+      continue;
+    }
     results.push(result);
   }
   if (results.length === 0) return null;
@@ -546,46 +563,118 @@ const chooseNextAction = async () => {
     return best;
   };
 
-  // 1) Capacity PRE-LIMIT/HARD protection has precedence over balancing
-  //    preference, regardless of Battery state. First derate Heatpump or
-  //    Wallbox by one operator-permitted step; if those paths are exhausted
-  //    and Battery is ON, release Battery charging as the next load reduction.
-  if (siteLimitGuardEnabled.value && headroomRatio.value >= preLimitRatio.value) {
-    const derating = getReductionCandidates(current).filter(candidate => {
-      const key = actionDelta(current, candidate);
-      return key === 'heatpump' || key === 'wallbox';
-    });
+  const evaluateCapacityCandidates = async candidates => {
+    const currentUsage = capacityUsageRatio.value;
+    if (currentUsage === null) return [];
     const evaluated = [];
-    for (const candidate of derating) {
+    for (const candidate of dedupeStates(candidates)) {
+      if (!automaticCandidateRespectsMonotonicRule(current, candidate)) continue;
       const result = await predictCandidate(candidate);
-      if (result?.voltageSafe) evaluated.push({ ...result, reliefA: prototypeReliefA(current, candidate) });
+      if (!result?.voltageSafe || result.capacityUsageRatio === null) continue;
+      const relief = currentUsage - result.capacityUsageRatio;
+      if (!(relief > 1e-9)) continue;
+      evaluated.push({ ...result, capacityRelief: relief });
     }
-    if (evaluated.length > 0) {
-      // Primary in headroom mode: release as much prototype current as possible;
-      // VUF is the tie-breaker. This uses the measured A/B current curves.
-      evaluated.sort((a, b) => (b.reliefA - a.reliefA) || (a.vuf - b.vuf));
-      return { ...evaluated[0], reason: 'headroom_derating' };
-    }
+    return evaluated;
+  };
 
-    // If both operator-limited HP/WB derating paths are exhausted, release the
-    // Battery load itself from PRE-LIMIT upward. Capacity protection outranks
-    // Battery-priority VUF optimization.
-    if (current.batteryCharging) {
-      const off = await predictCandidate({ ...current, batteryCharging: false });
-      if (off?.voltageSafe) {
+  // 1) Building-Capacity protection is independent from the VUF trigger but
+  //    reuses the same one-step execution path. No second controller/state
+  //    machine is introduced.
+  if (capacityNeedsAction.value) {
+    const currentUsage = capacityUsageRatio.value;
+
+    // HARD >= 100%: compare every legal load-reduction action, including
+    // Battery ON->OFF, and take the largest safe Building-Twin capacity relief.
+    if (currentUsage >= hardRatio.value) {
+      const hardCandidates = await evaluateCapacityCandidates(getReductionCandidates(current));
+      if (hardCandidates.length > 0) {
+        hardCandidates.sort((a, b) =>
+          (b.capacityRelief - a.capacityRelief) ||
+          (a.vuf - b.vuf)
+        );
+        const best = hardCandidates[0];
         return {
-          ...off,
-          reason: headroomRatio.value >= hardRatio.value ? 'hard_limit_battery_off' : 'headroom_battery_release',
+          ...best,
+          reason: actionDelta(current, best.state) === 'batteryCharging'
+            ? 'hard_limit_battery_off'
+            : 'hard_limit_derating',
         };
       }
+    } else {
+      // PRE-LIMIT / CRITICAL: first use operator-permitted HP/WB downshift.
+      // Because automatic upshift is forbidden, prefer the smallest sufficient
+      // intervention once a candidate can return capacity below PRE-LIMIT.
+      const derating = getReductionCandidates(current).filter(candidate => {
+        const key = actionDelta(current, candidate);
+        return key === 'heatpump' || key === 'wallbox';
+      });
+      const evaluated = await evaluateCapacityCandidates(derating);
+
+      if (evaluated.length > 0) {
+        const sufficient = evaluated.filter(result => result.capacityUsageRatio < preLimitRatio.value);
+        if (sufficient.length > 0) {
+          // Closest safe result below PRE-LIMIT = minimum sufficient downshift.
+          sufficient.sort((a, b) =>
+            (b.capacityUsageRatio - a.capacityUsageRatio) ||
+            (a.vuf - b.vuf)
+          );
+          return {
+            ...sufficient[0],
+            reason: currentUsage >= criticalRatio.value
+              ? 'critical_capacity_derating'
+              : 'headroom_derating',
+          };
+        }
+
+        // No single HP/WB step is sufficient. In CRITICAL prefer the largest
+        // relief; PRE-LIMIT does the same only because no sufficient one-step
+        // alternative exists.
+        evaluated.sort((a, b) =>
+          (b.capacityRelief - a.capacityRelief) ||
+          (a.vuf - b.vuf)
+        );
+        return {
+          ...evaluated[0],
+          reason: currentUsage >= criticalRatio.value
+            ? 'critical_capacity_derating'
+            : 'headroom_derating',
+        };
+      }
+
+      // Preserve the existing fallback: when HP/WB cannot legally derate any
+      // further, Battery charging may be released for capacity protection.
+      if (current.batteryCharging) {
+        const off = await predictCandidate({ ...current, batteryCharging: false });
+        if (
+          off?.voltageSafe &&
+          off.capacityUsageRatio !== null &&
+          off.capacityUsageRatio < currentUsage
+        ) {
+          return { ...off, reason: 'headroom_battery_release' };
+        }
+      }
     }
+
+    // Capacity protection has precedence. If no capacity-reducing one-step
+    // action is available, do not fall through into VUF optimization and do
+    // not generate a load-increasing Battery OFF->ON command.
+    return null;
   }
 
-  // 2) Battery-first balancing: when Battery is OFF and the site is not already
-  //    close to a configured headroom limit, try exactly this action first.
-  if (!current.batteryCharging && (!siteLimitGuardEnabled.value || headroomRatio.value < preLimitRatio.value)) {
+  // 2) Battery-first VUF balancing. Battery ON is still preferred below the
+  //    capacity PRE-LIMIT, but the predicted action must not hit the hard limit.
+  if (!current.batteryCharging && (!siteLimitGuardEnabled.value || capacityUsageRatio.value < preLimitRatio.value)) {
     const batteryCandidate = await predictCandidate({ ...current, batteryCharging: true });
-    if (batteryCandidate?.voltageSafe && batteryCandidate.vuf < currentVuf - minImprovement.value) {
+    const batteryCapacitySafe =
+      !siteLimitGuardEnabled.value ||
+      batteryCandidate?.capacityUsageRatio === null ||
+      batteryCandidate.capacityUsageRatio < hardRatio.value;
+    if (
+      batteryCandidate?.voltageSafe &&
+      batteryCapacitySafe &&
+      batteryCandidate.vuf < currentVuf - minImprovement.value
+    ) {
       return { ...batteryCandidate, reason: 'battery_priority' };
     }
   }
@@ -627,7 +716,7 @@ const batteryCanExitCritical = async current => {
     return Boolean(result?.voltageSafe && result.vuf <= vufEnterPct.value);
   }
 
-  if (siteLimitGuardEnabled.value && headroomRatio.value >= preLimitRatio.value) return false;
+  if (siteLimitGuardEnabled.value && capacityUsageRatio.value >= preLimitRatio.value) return false;
   const result = await predictCandidate({ ...current, batteryCharging: true });
   return Boolean(result?.voltageSafe && result.vuf <= vufEnterPct.value);
 };
@@ -638,7 +727,7 @@ const shouldEnterCriticalUnresolved = async () => {
   return !(await batteryCanExitCritical(current));
 };
 
-const selectAndApplyState = async repeatedViolation => {
+const selectAndApplyState = async (repeatedViolation, trigger = 'vuf') => {
   if (!autoEnabled.value || evaluating.value) return;
   if (!props.controlReady) {
     agentState.value = 'blocked';
@@ -648,7 +737,15 @@ const selectAndApplyState = async repeatedViolation => {
 
   evaluating.value = true;
   try {
-    addLog(repeatedViolation ? 'VUF still violated' : 'VUF violation detected', `Raw estimated VUF is ${Number(props.vuf).toFixed(3)}%.`, 'critical');
+    if (trigger === 'capacity') {
+      addLog(
+        repeatedViolation ? 'Capacity still above PRE-LIMIT' : 'Capacity PRE-LIMIT reached',
+        `Building Capacity is ${capacityUsageRatio.value !== null ? `${(capacityUsageRatio.value * 100).toFixed(1)}%` : '--'}.`,
+        capacityUsageRatio.value !== null && capacityUsageRatio.value >= hardRatio.value ? 'critical' : 'warning'
+      );
+    } else {
+      addLog(repeatedViolation ? 'VUF still violated' : 'VUF violation detected', `Raw estimated VUF is ${Number(props.vuf).toFixed(3)}%.`, 'critical');
+    }
     const action = await chooseNextAction();
     if (!autoEnabled.value) return;
     if (!action) {
@@ -664,7 +761,13 @@ const selectAndApplyState = async repeatedViolation => {
         );
       } else {
         agentState.value = 'monitoring';
-        addLog('No permitted adjustment found', 'No voltage-safe permitted one-step action is currently predicted to improve VUF. Heatpump/Wallbox automatic upshift is forbidden.', 'warning');
+        addLog(
+          'No permitted adjustment found',
+          trigger === 'capacity'
+            ? 'No voltage-safe permitted one-step action is currently predicted to reduce Building Capacity inside the configured adjustability limits.'
+            : 'No voltage-safe permitted one-step action is currently predicted to improve VUF. Heatpump/Wallbox automatic upshift is forbidden.',
+          'warning'
+        );
       }
       return;
     }
@@ -698,12 +801,21 @@ const selectAndApplyState = async repeatedViolation => {
     addLog(
       action.reason === 'battery_priority'
         ? 'Battery-priority action selected'
-        : action.reason === 'headroom_derating'
+        : ['headroom_derating', 'critical_capacity_derating', 'hard_limit_derating'].includes(action.reason)
           ? 'Capacity derating selected'
           : ['headroom_battery_release', 'hard_limit_battery_off'].includes(action.reason)
             ? 'Battery released for capacity protection'
             : 'Best one-step balancing action selected',
-      [`Heat pump ${action.state.heatpump}/5`, `Wallbox ${action.state.wallbox}/3`, `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`, `Predicted VUF ${formatVuf(action.vuf)}`, 'Voltage guard 207–253 V: OK'].join(' · '),
+      [
+        `Heat pump ${action.state.heatpump}/5`,
+        `Wallbox ${action.state.wallbox}/3`,
+        `Battery ${action.state.batteryCharging ? 'ON' : 'OFF'}`,
+        `Predicted VUF ${formatVuf(action.vuf)}`,
+        action.capacityUsageRatio !== null && action.capacityUsageRatio !== undefined
+          ? `Predicted Capacity ${(action.capacityUsageRatio * 100).toFixed(1)}%`
+          : null,
+        'Voltage guard 207–253 V: OK',
+      ].filter(Boolean).join(' · '),
       'action'
     );
     agentState.value = 'pending';
@@ -738,6 +850,11 @@ const evaluateAgent = async () => {
   else if (rawVuf < vufExitPct.value) imbalanceLatched.value = false;
 
   if (agentState.value === 'critical_unresolved') {
+    if (capacityNeedsAction.value) {
+      agentState.value = 'monitoring';
+      await selectAndApplyState(true, 'capacity');
+      return;
+    }
     if (!imbalanceLatched.value) {
       agentState.value = 'monitoring';
       addLog('Critical state cleared', `Raw estimated VUF ${rawVuf.toFixed(3)}% is below the release threshold ${vufExitPct.value.toFixed(2)}%.`, 'success');
@@ -747,15 +864,17 @@ const evaluateAgent = async () => {
 
   if (agentState.value === 'adjusting') {
     if (now.value < cooldownUntil.value) return;
-    if (imbalanceLatched.value) { await selectAndApplyState(true); return; }
+    if (capacityNeedsAction.value) { await selectAndApplyState(true, 'capacity'); return; }
+    if (imbalanceLatched.value) { await selectAndApplyState(true, 'vuf'); return; }
     prediction.value = null;
     agentState.value = 'monitoring';
-    addLog('VUF stabilized', `Raw estimated VUF ${rawVuf.toFixed(3)}% is below the release threshold ${vufExitPct.value.toFixed(2)}%.`, 'success');
+    addLog('Control target stabilized', `VUF ${rawVuf.toFixed(3)}% and configured Building Capacity are below their active control thresholds.`, 'success');
     return;
   }
 
   agentState.value = 'monitoring';
-  if (imbalanceLatched.value) await selectAndApplyState(false);
+  if (capacityNeedsAction.value) { await selectAndApplyState(false, 'capacity'); return; }
+  if (imbalanceLatched.value) await selectAndApplyState(false, 'vuf');
 };
 
 const toggleAuto = () => {
@@ -770,8 +889,8 @@ const toggleAuto = () => {
     addLog(
       'Monitoring started',
       hasPendingDevice.value
-        ? 'Automatic VUF control enabled. Existing pending command remains visible until execution feedback confirms it.'
-        : 'Automatic VUF control enabled.',
+        ? 'Automatic VUF/Capacity control enabled. Existing pending command remains visible until execution feedback confirms it.'
+        : 'Automatic VUF/Capacity control enabled.',
       'monitoring'
     );
     evaluateAgent();
@@ -781,13 +900,13 @@ const toggleAuto = () => {
   addLog(
     'Agent inactive',
     hasPendingDevice.value
-      ? 'Automatic VUF control disabled. Existing pending command remains visible until execution feedback confirms it.'
-      : 'Automatic VUF control disabled.',
+      ? 'Automatic VUF/Capacity control disabled. Existing pending command remains visible until execution feedback confirms it.'
+      : 'Automatic VUF/Capacity control disabled.',
     'inactive'
   );
 };
 
-watch(() => props.vuf, () => {
+watch([() => props.vuf, capacityUsageRatio], () => {
   if (!autoEnabled.value) return;
   if (['monitoring', 'blocked', 'critical_unresolved'].includes(agentState.value)) evaluateAgent();
 });
@@ -804,7 +923,7 @@ watch(
     heatpumpAdjustability,
     wallboxAdjustability,
     batteryEffectiveness,
-    headroomRatio,
+    capacityUsageRatio,
   ],
   retryCriticalUnresolved,
   { deep: true }

@@ -4,8 +4,9 @@ const agent = fs.readFileSync(new URL('../client/src/components/AgentCard.vue', 
 const config = fs.readFileSync(new URL('../client/src/ControlPolicyConfig.js', import.meta.url), 'utf8');
 assert.match(config, /batteryEffectiveMinA:\s*0\.10/);
 assert.match(agent, /reason:\s*'battery_priority'/);
-assert.match(agent, /reason:\s*'headroom_derating'/);
-assert.match(agent, /prototypeReliefA/);
+assert.match(agent, /'headroom_derating'/);
+assert.match(agent, /capacityRelief/);
+assert.doesNotMatch(agent, /prototypeReliefA/);
 assert.match(agent, /watch\(hasPendingDevice/);
 assert.match(agent, /cooldownUntil\.value = Date\.now\(\) \+ activeSettleMs\.value/);
 assert.match(agent, /rawVuf > vufEnterPct\.value/);
