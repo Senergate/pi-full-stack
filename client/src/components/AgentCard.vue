@@ -26,7 +26,7 @@
           <span>{{ formatVuf(vuf) }}</span>
           <span v-if="['pending','adjusting'].includes(agentState) && prediction" class="vuf-prediction">({{ formatVuf(prediction.vuf) }})</span>
         </div>
-        <div class="thresholds">Control enter {{ vufEnterPct.toFixed(1) }}% · release {{ vufExitPct.toFixed(1) }}% · Battery effective ≥ {{ batteryEffectiveMinA.toFixed(2) }} A</div>
+        <div class="thresholds">Control enter {{ vufEnterPct.toFixed(1) }}% · release {{ vufExitPct.toFixed(1) }}% · Battery effective ≥ {{ batteryEffectiveMinA.toFixed(2) }} A · {{ batteryEffectiveness.label }}</div>
         <div class="thresholds">HP min {{ heatpumpLocked ? 'LOCKED' : `L${heatpumpMinAllowedLevel}` }} · WB min {{ wallboxLocked ? 'LOCKED' : `L${wallboxMinAllowedLevel}` }} · Capacity {{ headroomRatio !== null ? `${(headroomRatio * 100).toFixed(1)}%` : 'OFF' }}</div>
       </div>
 
@@ -165,8 +165,9 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { classifyVuf, formatVufPercent } from '../VufPresentation.js';
-import { CONTROL_POLICY_DEFAULTS, PROTOTYPE_CURRENT_CURVES_A } from '../ControlPolicyConfig.js';
+import { CONTROL_POLICY_DEFAULTS, PROTOTYPE_CURRENT_CURVES_A, resolveControlPolicyThresholds } from '../ControlPolicyConfig.js';
 import { heatpumpAdjustabilityRule, phaseCurrentLimitA, wallboxAdjustabilityRule } from '../CapacitySupervisor.js';
+import { classifyBatteryEffectiveness } from '../MeasurementValidity.js';
 
 const TICK_MS = 250;
 const MAX_HEATPUMP = 5;
@@ -182,6 +183,8 @@ const props = defineProps({
   controlPolicy: { type: Object, required: false, default: () => ({}) },
   measuredCurrents: { type: Object, required: false, default: () => ({ a: null, b: null, c: null }) },
   measuredTotalPowerW: { type: Number, required: false, default: null },
+  modeledCurrents: { type: Object, required: false, default: () => ({ a: null, b: null, c: null }) },
+  modeledTotalPowerW: { type: Number, required: false, default: null },
   batteryMeasuredCurrentA: { type: Number, required: false, default: null },
 });
 
@@ -235,12 +238,12 @@ const policyNumber = (key, fallback) => {
   const value = Number(props.controlPolicy?.[key]);
   return Number.isFinite(value) ? value : fallback;
 };
-const vufEnterPct = computed(() => policyNumber('vufEnterPct', CONTROL_POLICY_DEFAULTS.vufEnterPct));
-const vufExitPct = computed(() => Math.min(vufEnterPct.value, policyNumber('vufExitPct', CONTROL_POLICY_DEFAULTS.vufExitPct)));
+const resolvedThresholds = computed(() => resolveControlPolicyThresholds(props.controlPolicy).values);
+const vufEnterPct = computed(() => resolvedThresholds.value.vufEnterPct);
+const vufExitPct = computed(() => resolvedThresholds.value.vufExitPct);
 const batteryEffectiveMinA = computed(() => policyNumber('batteryEffectiveMinA', CONTROL_POLICY_DEFAULTS.batteryEffectiveMinA));
-const preLimitRatio = computed(() => policyNumber('preLimitRatio', CONTROL_POLICY_DEFAULTS.preLimitRatio));
-const criticalRatio = computed(() => policyNumber('criticalRatio', CONTROL_POLICY_DEFAULTS.criticalRatio));
-const hardRatio = computed(() => policyNumber('hardRatio', CONTROL_POLICY_DEFAULTS.hardRatio));
+const preLimitRatio = computed(() => resolvedThresholds.value.preLimitRatio);
+const hardRatio = computed(() => resolvedThresholds.value.hardRatio);
 const minImprovement = computed(() => policyNumber('minVufImprovementPct', CONTROL_POLICY_DEFAULTS.minVufImprovementPct));
 
 const heatpumpAdjustabilityState = computed(() =>
@@ -257,22 +260,29 @@ const heatpumpMinAllowedLevel = computed(() => heatpumpAdjustabilityState.value.
 const wallboxMinAllowedLevel = computed(() => wallboxAdjustabilityState.value.minLevel);
 
 const headroomRatio = computed(() => {
+  // Capacity/Headroom is a Building-Twin control KPI. Configured building
+  // limits are compared with MODELED building values; prototype MEASURED
+  // currents remain reserved for physical-reference/safety semantics.
   const ratios = [];
   const pMax = policyNumber('siteMaxTotalPowerW', 0);
-  if (pMax > 0 && Number.isFinite(props.measuredTotalPowerW)) ratios.push(props.measuredTotalPowerW / pMax);
+  const modeledPower = props.modeledTotalPowerW === null || props.modeledTotalPowerW === undefined || props.modeledTotalPowerW === ''
+    ? null
+    : Number(props.modeledTotalPowerW);
+  if (pMax > 0 && modeledPower !== null && Number.isFinite(modeledPower)) ratios.push(modeledPower / pMax);
   for (const phase of ['a', 'b', 'c']) {
     const limit = phaseCurrentLimitA(props.controlPolicy, phase);
-    const current = Number(props.measuredCurrents?.[phase]);
-    if (limit > 0 && Number.isFinite(current)) ratios.push(current / limit);
+    const rawCurrent = props.modeledCurrents?.[phase];
+    const current = rawCurrent === null || rawCurrent === undefined || rawCurrent === '' ? null : Number(rawCurrent);
+    if (limit > 0 && current !== null && Number.isFinite(current)) ratios.push(current / limit);
   }
   return ratios.length > 0 ? Math.max(...ratios) : null;
 });
 const siteLimitGuardEnabled = computed(() => headroomRatio.value !== null);
-const batteryEffective = computed(() => {
-  if (normalizedDeviceStates.value.batteryCharging !== true) return true;
-  const current = Number(props.batteryMeasuredCurrentA);
-  return !Number.isFinite(current) || current >= batteryEffectiveMinA.value;
-});
+const batteryEffectiveness = computed(() => classifyBatteryEffectiveness({
+  charging: normalizedDeviceStates.value.batteryCharging,
+  deltaCurrentA: props.batteryMeasuredCurrentA,
+  minimumEffectiveA: batteryEffectiveMinA.value,
+}));
 
 const awaitingAiExecution = ref(false);
 const aiActionDevice = ref(null);
@@ -421,7 +431,7 @@ const predictCandidate = async state => {
   return {
     state,
     vuf: numeric,
-    voltageSafe: predictionResult.voltageSafe !== false,
+    voltageSafe: predictionResult.voltageSafe === true,
     voltages: predictionResult.voltages ?? null,
   };
 };
@@ -588,12 +598,17 @@ const chooseNextAction = async () => {
     ...getCompensationCandidates(current),
   ].filter(candidate => {
     const key = actionDelta(current, candidate);
-    if (!batteryEffective.value && key === 'batteryCharging') return false;
+    if (batteryEffectiveness.value.key === 'ineffective' && key === 'batteryCharging') return false;
     return true;
   });
 
   const best = await evaluateBest(allCandidates);
-  return best ? { ...best, reason: batteryEffective.value ? 'optimize_after_battery' : 'battery_ineffective_fallback' } : null;
+  const reason = batteryEffectiveness.value.key === 'ineffective'
+    ? 'battery_ineffective_fallback'
+    : batteryEffectiveness.value.key === 'unknown'
+      ? 'battery_effectiveness_unknown'
+      : 'optimize_after_battery';
+  return best ? { ...best, reason } : null;
 };
 
 const heatpumpAtAdjustabilityFloor = current =>
@@ -603,11 +618,15 @@ const wallboxAtAdjustabilityFloor = current =>
   wallboxLocked.value || wallboxMinAllowedLevel.value === null || current.wallbox <= wallboxMinAllowedLevel.value;
 
 const batteryCanExitCritical = async current => {
-  // Battery already ON and VUF is still critical: there is no additional ON
-  // action left. When OFF, Battery may only be considered if capacity policy
-  // still permits adding load, and the predicted state actually exits the
-  // VUF critical-enter boundary.
-  if (current.batteryCharging) return false;
+  // CRITICAL_UNRESOLVED may only be entered after testing the permitted
+  // opposite Battery state as well. Battery is intentionally bidirectional:
+  // OFF -> ON may compensate an imbalance; ON -> OFF may also improve VUF or
+  // release capacity. HP/WB remain downshift-only.
+  if (current.batteryCharging) {
+    const result = await predictCandidate({ ...current, batteryCharging: false });
+    return Boolean(result?.voltageSafe && result.vuf <= vufEnterPct.value);
+  }
+
   if (siteLimitGuardEnabled.value && headroomRatio.value >= preLimitRatio.value) return false;
   const result = await predictCandidate({ ...current, batteryCharging: true });
   return Boolean(result?.voltageSafe && result.vuf <= vufEnterPct.value);
@@ -784,7 +803,7 @@ watch(
     normalizedDeviceStates,
     heatpumpAdjustability,
     wallboxAdjustability,
-    batteryEffective,
+    batteryEffectiveness,
     headroomRatio,
   ],
   retryCriticalUnresolved,

@@ -39,25 +39,30 @@ export const DEFAULT_ELECTRICAL_PROFILES = Object.freeze({
       phase: 'a',
       q_sign: 'lagging',
       target_current_a: BUILDING_TARGETS.heatpumpMaxCurrentA,
-      // Non-linear fallback only. Real calibration replaces these points.
+      // Measured-shape fallback from the real prototype current curve
+      // (0.09/0.16/0.21/0.24/0.26 A, normalized to Level 5 = 1.0).
+      // Real calibrated P+jQ points still override these fractions.
       points: {
-        0: { fraction: 0.00, pf: 1.00 },
-        1: { fraction: 0.15, pf: 0.90 },
-        2: { fraction: 0.30, pf: 0.90 },
-        3: { fraction: 0.48, pf: 0.91 },
-        4: { fraction: 0.72, pf: 0.92 },
-        5: { fraction: 1.00, pf: 0.93 },
+        0: { fraction: 0.000, pf: 1.00 },
+        1: { fraction: 0.346, pf: 0.90 },
+        2: { fraction: 0.615, pf: 0.90 },
+        3: { fraction: 0.808, pf: 0.91 },
+        4: { fraction: 0.923, pf: 0.92 },
+        5: { fraction: 1.000, pf: 0.93 },
       },
     },
     wallbox: {
       phase: 'b',
       q_sign: 'near_unity',
       target_current_a: BUILDING_TARGETS.wallboxMaxCurrentA,
+      // Measured-shape fallback from the real prototype current curve
+      // (0.14/0.30/0.42 A, normalized to mask 3 = 1.0). Relay masks remain
+      // discrete states; they are not assumed to be equal 50/50 loads.
       points: {
-        0: { fraction: 0.00, pf: 1.000 },
-        1: { fraction: 0.50, pf: 0.995 },
-        2: { fraction: 0.50, pf: 0.995 },
-        3: { fraction: 1.00, pf: 0.995 },
+        0: { fraction: 0.000, pf: 1.000 },
+        1: { fraction: 0.333, pf: 0.995 },
+        2: { fraction: 0.714, pf: 0.995 },
+        3: { fraction: 1.000, pf: 0.995 },
       },
     },
     battery: {

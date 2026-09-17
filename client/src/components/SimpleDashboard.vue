@@ -17,8 +17,9 @@ import {
   classifyBranchAStatusForCommand,
   shouldCompleteBranchACommand,
 } from '../BranchACommandCorrelation.js';
-import { cloneControlPolicyDefaults } from '../ControlPolicyConfig.js';
+import { cloneControlPolicyDefaults, CONTROL_THRESHOLD_KEYS, validateControlPolicyThresholds } from '../ControlPolicyConfig.js';
 import { computeCapacityStatus, heatpumpAdjustabilityRule, wallboxAdjustabilityRule } from '../CapacitySupervisor.js';
+import { computeBatteryDeltaCurrentA, computeCompleteThreePhaseLoadPowerW } from '../MeasurementValidity.js';
 import {
   DEFAULT_ELECTRICAL_PROFILES,
   baselineVoltagesFromProfiles,
@@ -76,7 +77,7 @@ const GRID_IMPEDANCE_PRESETS = {
   },
 };
 
-const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-d-live-capacity-ui';
+const FRONTEND_BUILD_VERSION = 'v1.5.1-ai-g-building-capacity-operator-ux';
 const HEATPUMP_LEVELS = BUILDING_TWIN_CONFIG.heatpumpLevels;
 const HEATPUMP_LEVEL_TO_HZ = Object.freeze({ 0: 0, 1: 10, 2: 20, 3: 30, 4: 40, 5: 50 });
 
@@ -112,7 +113,7 @@ const _ = reactive({
     calibration: { running: false, progress: { stage: 'idle', index: 0, total: 0, message: '' } },
   },
   agent: { enabled: false, state: 'inactive' },
-  controlPolicy: cloneControlPolicyDefaults('battery_priority_capacity_adjustability_v2'),
+  controlPolicy: cloneControlPolicyDefaults(),
   mqtt: { connected: false, lastHeartbeatAt: null },
   startup: {
     phase: 'connecting',
@@ -410,10 +411,7 @@ const projectedCurrents = computed(() => {
 
 const currentVuf = computed(() => numberOrNull(vufResult.value?.vufPercent));
 const baselineVuf = computed(() => numberOrNull(vufResult.value?.baselineVufPercent));
-const loadImpactVuf = computed(() => {
-  const delta = numberOrNull(vufResult.value?.scenarioDeltaVufPercent);
-  return delta === null ? null : Math.max(0, delta);
-});
+const loadImpactVuf = computed(() => numberOrNull(vufResult.value?.scenarioDeltaVufPercent));
 
 const loadVoltagesForPhasor = computed(() => {
   const values = vufResult.value?.loadVoltageMagnitudes;
@@ -435,7 +433,12 @@ const loadAnglesForPhasor = computed(() => {
   };
 });
 
-const voltagePredictionSafe = computed(() => vufResult.value?.voltageSafe === true);
+const voltagePredictionState = computed(() => {
+  const value = vufResult.value?.voltageSafe;
+  if (value === true) return { key: 'safe', label: 'SAFE' };
+  if (value === false) return { key: 'unsafe', label: 'VIOLATED' };
+  return { key: 'unknown', label: 'UNKNOWN' };
+});
 
 const measurementFresh = computed(() =>
   _.energy_meter.timedelta !== null && _.energy_meter.timedelta < 3
@@ -587,26 +590,37 @@ const wallboxLevel = computed(() => {
 const batteryCharging = computed(() => (_.battery.charging === null ? null : _.battery.charging === true));
 
 
-const measuredTotalPowerW = computed(() => {
-  const values = ['a_act_power', 'b_act_power', 'c_act_power']
-    .map(key => numberOrNull(_.energy_meter.measured?.[key]))
-    .filter(value => value !== null);
-  if (values.length === 0) return null;
-  return values.reduce((sum, value) => sum + Math.max(0, value), 0);
+const measuredTotalPowerW = computed(() =>
+  computeCompleteThreePhaseLoadPowerW(_.energy_meter.measured)
+);
+
+const modeledTotalPowerW = computed(() => {
+  const powers = buildingPowerModel.value?.powers;
+  if (!powers) return null;
+  const phasePowers = [powers.a?.p, powers.b?.p, powers.c?.p].map(numberOrNull);
+  if (phasePowers.some(value => value === null)) return null;
+  return phasePowers.reduce((sum, value) => sum + value, 0);
 });
 
-const batteryMeasuredCurrentA = computed(() => {
-  if (batteryCharging.value !== true) return 0;
-  const rawCurrent = numberOrNull(_.energy_meter.raw?.c_current);
-  const baselineRawCurrent = numberOrNull(activeProfiles.value?.baseline?.measured?.c?.current_a);
-  if (rawCurrent !== null && baselineRawCurrent !== null) return Math.max(0, rawCurrent - baselineRawCurrent);
-  return measuredCurrents.value.c;
-});
+const modeledCapacityCurrents = computed(() => ({
+  a: projectedCurrents.value.a,
+  b: projectedCurrents.value.b,
+  c: projectedCurrents.value.c,
+}));
+
+const batteryMeasuredCurrentA = computed(() => computeBatteryDeltaCurrentA({
+  charging: batteryCharging.value,
+  rawPhaseCurrentA: _.energy_meter.raw?.c_current,
+  baselinePhaseCurrentA: activeProfiles.value?.baseline?.measured?.c?.current_a,
+}));
 
 const capacityStatus = computed(() => computeCapacityStatus({
   policy: _.controlPolicy,
   measuredCurrents: measuredCurrents.value,
   measuredTotalPowerW: measuredTotalPowerW.value,
+  modeledCurrents: modeledCapacityCurrents.value,
+  modeledTotalPowerW: modeledTotalPowerW.value,
+  dataFresh: measurementFresh.value,
 }));
 
 const siteLimitsEnabled = computed(() => capacityStatus.value.enabled);
@@ -618,6 +632,7 @@ const capacityUsageRatio = computed(() => capacityStatus.value.usageRatio);
 const siteHeadroomRatio = capacityUsageRatio;
 const remainingHeadroomRatio = computed(() => capacityStatus.value.remainingRatio);
 const capacityState = computed(() => capacityStatus.value.state);
+const capacityDataFresh = computed(() => capacityStatus.value.dataFresh);
 const capacityUsagePercent = computed(() => capacityUsageRatio.value === null ? null : capacityUsageRatio.value * 100);
 const remainingHeadroomPercent = computed(() => remainingHeadroomRatio.value === null ? null : remainingHeadroomRatio.value * 100);
 
@@ -627,7 +642,7 @@ const heatpumpMinAllowedLabel = computed(() => heatpumpAdjustabilityState.value.
 const wallboxMinAllowedLabel = computed(() => wallboxAdjustabilityState.value.locked ? 'LOCKED' : `Level ${wallboxAdjustabilityState.value.minLevel}`);
 
 const formatCapacityValue = (value, unit) => {
-  if (!Number.isFinite(Number(value))) return '--';
+  if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return '--';
   const numeric = Number(value);
   if (unit === 'W' && Math.abs(numeric) >= 1000) return `${(numeric / 1000).toFixed(2)} kW`;
   if (unit === 'W') return `${numeric.toFixed(0)} W`;
@@ -636,12 +651,14 @@ const formatCapacityValue = (value, unit) => {
 };
 
 const formatCapacityLimit = (value, unit) =>
-  Number.isFinite(Number(value)) && Number(value) > 0
+  value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) > 0
     ? formatCapacityValue(value, unit)
     : 'Not configured';
 
 const formatCapacityUsage = ratio =>
-  Number.isFinite(Number(ratio)) ? `${(Number(ratio) * 100).toFixed(1)}%` : '--';
+  ratio !== null && ratio !== undefined && ratio !== '' && Number.isFinite(Number(ratio))
+    ? `${(Number(ratio) * 100).toFixed(1)}%`
+    : '--';
 
 const capacityLimitModeLabel = computed(() => {
   if (!siteLimitsEnabled.value) return 'Limits: OFF';
@@ -652,11 +669,80 @@ const capacityLimitModeLabel = computed(() => {
 
 const capacityPanelExpanded = ref(false);
 const gridImpedanceExpanded = ref(true);
+const operatorAdjustabilityExpanded = ref(false);
 const advancedControlExpanded = ref(false);
 
 const CAPACITY_PANEL_STORAGE_KEY = 'senergate.capacityPanelExpanded';
 const GRID_IMPEDANCE_STORAGE_KEY = 'senergate.gridImpedanceExpanded';
+const OPERATOR_ADJUSTABILITY_STORAGE_KEY = 'senergate.operatorAdjustabilityExpanded';
 const ADVANCED_CONTROL_STORAGE_KEY = 'senergate.advancedControlExpanded';
+
+const adjustabilityDraft = reactive({
+  heatpump: _.controlPolicy.heatpumpAdjustability,
+  wallbox: _.controlPolicy.wallboxAdjustability,
+});
+const adjustabilityEditing = ref(null);
+const adjustabilityValidationMessage = reactive({ heatpump: '', wallbox: '' });
+
+const previewAdjustabilityRule = (asset, value) =>
+  asset === 'heatpump' ? heatpumpAdjustabilityRule(value) : wallboxAdjustabilityRule(value);
+
+const heatpumpAdjustabilityPreview = computed(() => previewAdjustabilityRule('heatpump', adjustabilityDraft.heatpump));
+const wallboxAdjustabilityPreview = computed(() => previewAdjustabilityRule('wallbox', adjustabilityDraft.wallbox));
+
+const adjustabilityPreviewLabel = rule => rule.locked ? 'LOCKED' : `Minimum Level ${rule.minLevel}`;
+
+const commitAdjustability = asset => {
+  const key = asset === 'heatpump' ? 'heatpumpAdjustability' : 'wallboxAdjustability';
+  const numeric = Number(adjustabilityDraft[asset]);
+  if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric < 1 || numeric > 100) {
+    adjustabilityValidationMessage[asset] = 'Valid range: integer 1–100. Previous active value remains unchanged.';
+    adjustabilityDraft[asset] = _.controlPolicy[key];
+    return false;
+  }
+  _.controlPolicy[key] = numeric;
+  adjustabilityDraft[asset] = numeric;
+  adjustabilityValidationMessage[asset] = '';
+  return true;
+};
+
+const finishAdjustabilityEdit = asset => {
+  commitAdjustability(asset);
+  adjustabilityEditing.value = null;
+};
+
+const handleAdjustabilityKeydown = (event, asset) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  commitAdjustability(asset);
+  event.currentTarget?.blur();
+};
+
+const thresholdValidationMessage = ref('');
+const lastValidThresholds = reactive(Object.fromEntries(
+  CONTROL_THRESHOLD_KEYS.map(key => [key, _.controlPolicy[key]])
+));
+let restoringInvalidThresholds = false;
+
+watch(
+  () => CONTROL_THRESHOLD_KEYS.map(key => _.controlPolicy[key]),
+  () => {
+    if (restoringInvalidThresholds) return;
+
+    const validation = validateControlPolicyThresholds(_.controlPolicy);
+    if (validation.valid) {
+      for (const key of CONTROL_THRESHOLD_KEYS) lastValidThresholds[key] = _.controlPolicy[key];
+      thresholdValidationMessage.value = '';
+      return;
+    }
+
+    thresholdValidationMessage.value = validation.errors.join(' ');
+    restoringInvalidThresholds = true;
+    for (const key of CONTROL_THRESHOLD_KEYS) _.controlPolicy[key] = lastValidThresholds[key];
+    queueMicrotask(() => { restoringInvalidThresholds = false; });
+  },
+  { flush: 'sync' }
+);
 
 const loadAccordionState = (key, fallback) => {
   try {
@@ -682,12 +768,23 @@ onMounted(() => {
   // Keep the existing dashboard appearance on first load: Grid Impedance stays
   // open until the operator explicitly collapses it.
   gridImpedanceExpanded.value = loadAccordionState(GRID_IMPEDANCE_STORAGE_KEY, true);
+  operatorAdjustabilityExpanded.value = loadAccordionState(OPERATOR_ADJUSTABILITY_STORAGE_KEY, false);
+  adjustabilityDraft.heatpump = _.controlPolicy.heatpumpAdjustability;
+  adjustabilityDraft.wallbox = _.controlPolicy.wallboxAdjustability;
   advancedControlExpanded.value = loadAccordionState(ADVANCED_CONTROL_STORAGE_KEY, false);
 });
 
 watch(capacityPanelExpanded, value => persistAccordionState(CAPACITY_PANEL_STORAGE_KEY, value));
 watch(gridImpedanceExpanded, value => persistAccordionState(GRID_IMPEDANCE_STORAGE_KEY, value));
+watch(operatorAdjustabilityExpanded, value => persistAccordionState(OPERATOR_ADJUSTABILITY_STORAGE_KEY, value));
 watch(advancedControlExpanded, value => persistAccordionState(ADVANCED_CONTROL_STORAGE_KEY, value));
+
+watch(() => _.controlPolicy.heatpumpAdjustability, value => {
+  if (adjustabilityEditing.value !== 'heatpump') adjustabilityDraft.heatpump = value;
+});
+watch(() => _.controlPolicy.wallboxAdjustability, value => {
+  if (adjustabilityEditing.value !== 'wallbox') adjustabilityDraft.wallbox = value;
+});
 
 const agentDeviceStates = computed(() => ({
   heatpump: heatpumpLevel.value,
@@ -1301,7 +1398,7 @@ onUnmounted(() => {
             class="grid-collapse-toggle"
             :aria-expanded="gridImpedanceExpanded"
             @click="gridImpedanceExpanded = !gridImpedanceExpanded"
-          >{{ gridImpedanceExpanded ? '▲ HIDE' : '▼ SHOW' }}</button>
+          ><span class="accordion-chevron">{{ gridImpedanceExpanded ? '▲' : '▼' }}</span><span>{{ gridImpedanceExpanded ? 'HIDE' : 'SHOW' }}</span></button>
         </div>
       </div>
 
@@ -1357,15 +1454,17 @@ onUnmounted(() => {
           <strong>{{ capacityUsagePercent !== null ? `${capacityUsagePercent.toFixed(1)}%` : '--' }}</strong>
           <span>Headroom {{ remainingHeadroomPercent !== null ? `${remainingHeadroomPercent.toFixed(1)}%` : '--' }}</span>
           <span>{{ capacityLimitModeLabel }}</span>
-          <span class="capacity-live-inline">
-            P {{ formatCapacityValue(measuredTotalPowerW, 'W') }} ·
-            L1 {{ formatCapacityValue(measuredCurrents.a, 'A') }} ·
-            L2 {{ formatCapacityValue(measuredCurrents.b, 'A') }} ·
-            L3 {{ formatCapacityValue(measuredCurrents.c, 'A') }}
+          <span class="capacity-live-inline" :class="{ stale: !capacityDataFresh }">
+            <template v-if="!capacityDataFresh">LAST KNOWN{{ _.energy_meter.timedelta !== null ? ` ${_.energy_meter.timedelta.toFixed(1)}s` : '' }} · </template>
+            REAL P {{ formatCapacityValue(measuredTotalPowerW, 'W') }} ·
+            SIM P {{ formatCapacityValue(modeledTotalPowerW, 'W') }} ·
+            SIM L1 {{ formatCapacityValue(modeledCapacityCurrents.a, 'A') }} ·
+            SIM L2 {{ formatCapacityValue(modeledCapacityCurrents.b, 'A') }} ·
+            SIM L3 {{ formatCapacityValue(modeledCapacityCurrents.c, 'A') }}
           </span>
           <span v-if="limitingCapacityMetric">Limit: {{ limitingCapacityMetric.label }}</span>
           <span class="capacity-state-badge">{{ capacityState.label }}</span>
-          <span class="capacity-chevron">{{ capacityPanelExpanded ? '▲' : '▼' }}</span>
+          <span class="capacity-chevron accordion-chevron">{{ capacityPanelExpanded ? '▲' : '▼' }}</span>
         </button>
 
         <div v-if="capacityPanelExpanded" class="capacity-details">
@@ -1390,7 +1489,7 @@ onUnmounted(() => {
 
           <div class="capacity-metric-table">
             <div class="capacity-metric-row capacity-metric-head">
-              <span>Metric</span><span>Actual</span><span>100% Limit</span><span>Usage</span>
+              <span>Metric</span><span>Prototype · MEASURED</span><span>Building Twin · MODELED</span><span>100% Limit</span><span>Usage</span>
             </div>
             <div
               v-for="metric in capacityMetrics"
@@ -1399,19 +1498,30 @@ onUnmounted(() => {
               :class="{ limiting: metric.key === limitingCapacityMetric?.key }"
             >
               <span>{{ metric.label }}</span>
-              <span class="capacity-live-value">{{ formatCapacityValue(metric.actual, metric.unit) }}</span>
+              <span class="capacity-live-value measured-value">
+                {{ formatCapacityValue(metric.measured, metric.unit) }}
+                <small v-if="!metric.fresh && metric.measured !== null" class="last-known-label">LAST KNOWN</small>
+              </span>
+              <span class="capacity-live-value modeled-value">
+                {{ formatCapacityValue(metric.modeled, metric.unit) }}
+                <small>BUILDING TWIN</small>
+              </span>
               <span>{{ formatCapacityLimit(metric.limit, metric.unit) }}</span>
               <strong>{{ formatCapacityUsage(metric.ratio) }}</strong>
             </div>
           </div>
 
-          <div v-if="!siteLimitsEnabled" class="capacity-empty">
-            Live measurements remain visible. Capacity hard limits are not configured, therefore Usage/Headroom protection is not active.
-            / 实时测量继续显示；由于尚未配置 Capacity 硬限制，Usage/Headroom 保护暂不启用。
+          <div v-if="!capacityDataFresh" class="capacity-empty capacity-stale-note">
+            Measurement data is stale. Values above are LAST KNOWN only; Capacity Usage/Headroom is suspended until fresh Shelly data returns.
+            / 测量数据已过期。上方数值仅为最后一次有效值；在新的 Shelly 数据恢复前暂停 Capacity Usage/Headroom 计算。
+          </div>
+          <div v-else-if="!siteLimitsEnabled" class="capacity-empty">
+            Prototype MEASURED and Building-Twin MODELED values remain visible. Capacity Usage uses MODELED values only; limits are not configured, therefore Usage/Headroom protection is not active.
+            / Prototype 实测值与 Building Twin 模拟值继续显示；Capacity Usage 仅使用 MODELED 值。由于尚未配置限制，Usage/Headroom 保护暂不启用。
           </div>
           <div v-else-if="!capacityLimitsFullyConfigured" class="capacity-empty">
-            Partial limit configuration: only configured limits with valid live data participate in Capacity Usage.
-            / 部分限制已配置：只有已配置且具有有效实时数据的指标参与 Capacity Usage 计算。
+            Partial limit configuration: only configured limits with valid Building-Twin MODELED values participate in Capacity Usage.
+            / 部分限制已配置：只有已配置且具有有效 Building Twin MODELED 数据的指标参与 Capacity Usage 计算。
           </div>
 
           <div class="grid-derived capacity-reference-row">
@@ -1422,22 +1532,64 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="operator-control-head">
-          <strong>Operator Adjustability / Bedien-Eingriffsgrenze / 用户可调范围</strong>
-          <span>Normal operation controls · AI downshift only</span>
-        </div>
+        <button
+          type="button"
+          class="operator-adjustability-summary"
+          :aria-expanded="operatorAdjustabilityExpanded"
+          @click="operatorAdjustabilityExpanded = !operatorAdjustabilityExpanded"
+        >
+          <span>
+            <strong>Operator Adjustability / Bedien-Eingriffsgrenze / 用户可调范围</strong>
+            <small>HP {{ _.controlPolicy.heatpumpAdjustability }} → {{ heatpumpMinAllowedLabel }} · WB {{ _.controlPolicy.wallboxAdjustability }} → {{ wallboxMinAllowedLabel }} · AI downshift only</small>
+          </span>
+          <span class="capacity-chevron accordion-chevron">{{ operatorAdjustabilityExpanded ? '▲' : '▼' }}</span>
+        </button>
 
-        <div class="operator-control-grid">
-          <label>
-            <span>Heatpump adjustability [1–100]</span>
-            <input v-model.number="_.controlPolicy.heatpumpAdjustability" type="number" min="1" max="100" step="1" />
-            <small>AI downshift floor: {{ heatpumpMinAllowedLabel }} · no auto-upshift</small>
-          </label>
-          <label>
-            <span>Wallbox adjustability [1–100]</span>
-            <input v-model.number="_.controlPolicy.wallboxAdjustability" type="number" min="1" max="100" step="1" />
-            <small>AI downshift floor: {{ wallboxMinAllowedLabel }} · no auto-upshift</small>
-          </label>
+        <div v-if="operatorAdjustabilityExpanded" class="operator-adjustability-details">
+          <div class="operator-control-grid">
+            <label>
+              <span>Heatpump adjustability [1–100]</span>
+              <input
+                v-model="adjustabilityDraft.heatpump"
+                type="number" min="1" max="100" step="1"
+                @focus="adjustabilityEditing = 'heatpump'"
+                @blur="finishAdjustabilityEdit('heatpump')"
+                @keydown="handleAdjustabilityKeydown($event, 'heatpump')"
+              />
+              <small>Active: {{ heatpumpMinAllowedLabel }} · no auto-upshift</small>
+              <small v-if="adjustabilityValidationMessage.heatpump" class="adjustability-error">{{ adjustabilityValidationMessage.heatpump }}</small>
+              <div v-if="adjustabilityEditing === 'heatpump'" class="adjustability-helper">
+                <strong>Preview: {{ adjustabilityPreviewLabel(heatpumpAdjustabilityPreview) }}</strong>
+                <span :class="{ active: heatpumpAdjustabilityPreview.minLevel === 1 && !heatpumpAdjustabilityPreview.locked }">1–20 → Min Level 1</span>
+                <span :class="{ active: heatpumpAdjustabilityPreview.minLevel === 2 && !heatpumpAdjustabilityPreview.locked }">21–40 → Min Level 2</span>
+                <span :class="{ active: heatpumpAdjustabilityPreview.minLevel === 3 && !heatpumpAdjustabilityPreview.locked }">41–60 → Min Level 3</span>
+                <span :class="{ active: heatpumpAdjustabilityPreview.minLevel === 4 && !heatpumpAdjustabilityPreview.locked }">61–80 → Min Level 4</span>
+                <span :class="{ active: heatpumpAdjustabilityPreview.minLevel === 5 && !heatpumpAdjustabilityPreview.locked }">81–90 → Min Level 5</span>
+                <span :class="{ active: heatpumpAdjustabilityPreview.locked }">91–100 → AI LOCKED</span>
+                <small>Preview only while typing. Enter or leave the field to validate and apply. Automatic upshift is never allowed.</small>
+              </div>
+            </label>
+
+            <label>
+              <span>Wallbox adjustability [1–100]</span>
+              <input
+                v-model="adjustabilityDraft.wallbox"
+                type="number" min="1" max="100" step="1"
+                @focus="adjustabilityEditing = 'wallbox'"
+                @blur="finishAdjustabilityEdit('wallbox')"
+                @keydown="handleAdjustabilityKeydown($event, 'wallbox')"
+              />
+              <small>Active: {{ wallboxMinAllowedLabel }} · no auto-upshift</small>
+              <small v-if="adjustabilityValidationMessage.wallbox" class="adjustability-error">{{ adjustabilityValidationMessage.wallbox }}</small>
+              <div v-if="adjustabilityEditing === 'wallbox'" class="adjustability-helper">
+                <strong>Preview: {{ adjustabilityPreviewLabel(wallboxAdjustabilityPreview) }}</strong>
+                <span :class="{ active: wallboxAdjustabilityPreview.minLevel === 1 && !wallboxAdjustabilityPreview.locked }">1–30 → Min Level 1</span>
+                <span :class="{ active: wallboxAdjustabilityPreview.minLevel === 2 && !wallboxAdjustabilityPreview.locked }">31–90 → Min Level 2</span>
+                <span :class="{ active: wallboxAdjustabilityPreview.locked }">91–100 → AI LOCKED</span>
+                <small>Preview only while typing. Enter or leave the field to validate and apply. Automatic upshift is never allowed.</small>
+              </div>
+            </label>
+          </div>
         </div>
 
         <button
@@ -1450,7 +1602,7 @@ onUnmounted(() => {
             <strong>Advanced Control Parameters / Erweiterte Regelparameter / 高级控制参数</strong>
             <small>Site limits · VUF hysteresis · Battery effectiveness · Capacity margins</small>
           </span>
-          <span class="capacity-chevron">{{ advancedControlExpanded ? '▲' : '▼' }}</span>
+          <span class="capacity-chevron accordion-chevron">{{ advancedControlExpanded ? '▲' : '▼' }}</span>
         </button>
 
         <div v-if="advancedControlExpanded" class="advanced-control-details">
@@ -1458,28 +1610,32 @@ onUnmounted(() => {
             <div>
               <strong>AI Control Thresholds / Regler-Schwellen / AI 控制阈值</strong>
               <p>
-                Site hard limits use 0 = disabled. Capacity Usage uses only configured limits with valid live measurements.
-                / 现场硬限制以 0=禁用；Capacity Usage 只使用已配置且具有有效实时测量的限制。
+                Building capacity limits use 0 = disabled. Capacity Usage compares Building-Twin MODELED values against configured limits; Prototype MEASURED values remain a separate physical reference.
+                / 建筑容量限制以 0=禁用；Capacity Usage 使用 Building Twin MODELED 值与配置上限比较，Prototype MEASURED 值继续作为独立物理参考。
               </p>
             </div>
             <span class="grid-provenance">{{ _.controlPolicy.strategy.toUpperCase() }}</span>
           </div>
 
+          <div v-if="thresholdValidationMessage" class="control-policy-error">
+            {{ thresholdValidationMessage }} · Invalid edit rejected; previous valid thresholds remain active.
+          </div>
+
           <div class="control-policy-grid">
             <label>
-              <span>Site max total power [W] · 0=OFF</span>
+              <span>Building max total power [W] · 0=OFF</span>
               <input v-model.number="_.controlPolicy.siteMaxTotalPowerW" type="number" min="0" step="100" />
             </label>
             <label>
-              <span>Site max L1 current [A] · 0=OFF</span>
+              <span>Building max L1 current [A] · 0=OFF</span>
               <input v-model.number="_.controlPolicy.siteMaxCurrentL1A" type="number" min="0" step="0.1" />
             </label>
             <label>
-              <span>Site max L2 current [A] · 0=OFF</span>
+              <span>Building max L2 current [A] · 0=OFF</span>
               <input v-model.number="_.controlPolicy.siteMaxCurrentL2A" type="number" min="0" step="0.1" />
             </label>
             <label>
-              <span>Site max L3 current [A] · 0=OFF</span>
+              <span>Building max L3 current [A] · 0=OFF</span>
               <input v-model.number="_.controlPolicy.siteMaxCurrentL3A" type="number" min="0" step="0.1" />
             </label>
             <label>
@@ -1515,6 +1671,7 @@ onUnmounted(() => {
         </div>
 
         <div class="grid-derived">
+          <span>Capacity data: {{ measurementFresh ? 'LIVE' : 'STALE / LAST KNOWN' }}</span>
           <span>Capacity guard: {{ siteLimitsEnabled ? (capacityLimitsFullyConfigured ? 'CONFIGURED' : 'PARTIAL') : 'LIMITS NOT CONFIGURED' }}</span>
           <span>Measured total P: {{ measuredTotalPowerW !== null ? `${measuredTotalPowerW.toFixed(0)} W` : '--' }}</span>
           <span>L1/L2/L3 live: {{ formatCapacityValue(measuredCurrents.a, 'A') }} / {{ formatCapacityValue(measuredCurrents.b, 'A') }} / {{ formatCapacityValue(measuredCurrents.c, 'A') }}</span>
@@ -1529,7 +1686,7 @@ onUnmounted(() => {
           <span>P/Q profile: {{ electricalProfileSummary.provenance }}</span>
           <span>Baseline: {{ baselineModel.source }}</span>
           <span v-if="electricalProfileSummary.generatedAt">Profile time: {{ electricalProfileSummary.generatedAt }}</span>
-          <span class="voltage-guard" :class="{ safe: voltagePredictionSafe, unsafe: !voltagePredictionSafe }">Voltage guard 207–253 V: {{ voltagePredictionSafe ? 'SAFE' : 'VIOLATED' }}</span>
+          <span class="voltage-guard" :class="voltagePredictionState.key">Voltage guard 207–253 V: {{ voltagePredictionState.label }}</span>
         </div>
         <div class="calibration-actions">
           <button
@@ -1571,6 +1728,8 @@ onUnmounted(() => {
         :control-policy="_.controlPolicy"
         :measured-currents="measuredCurrents"
         :measured-total-power-w="measuredTotalPowerW"
+        :modeled-currents="modeledCapacityCurrents"
+        :modeled-total-power-w="modeledTotalPowerW"
         :battery-measured-current-a="batteryMeasuredCurrentA"
         @apply-state="applyAgentDeviceState"
         @heatpump-zero-hold="requestHeatpumpZeroHold"
@@ -1595,6 +1754,6 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.capacity-summary{width:100%;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:9px 11px;border:1px solid #284b60;border-radius:10px;background:#07131d;color:#b9d6e5;cursor:pointer;text-align:left}.capacity-summary-title{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#789aac}.capacity-summary strong{font-size:14px;color:#eaf6ff}.capacity-summary span:not(.capacity-summary-title):not(.capacity-chevron):not(.capacity-state-badge){font-size:10px;color:#8daec0}.capacity-state-badge{margin-left:auto;padding:4px 7px;border:1px solid #36556a;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.06em}.capacity-chevron{font-size:10px;color:#789aac}.capacity-summary.capacity-warning{border-color:#665c2d}.capacity-summary.capacity-warning .capacity-state-badge{border-color:#665c2d;color:#ffe795}.capacity-summary.capacity-prelimit{border-color:#8f6a2c}.capacity-summary.capacity-prelimit .capacity-state-badge{border-color:#8f6a2c;color:#ffd166}.capacity-summary.capacity-critical,.capacity-summary.capacity-hard{border-color:#6b3740}.capacity-summary.capacity-critical .capacity-state-badge,.capacity-summary.capacity-hard .capacity-state-badge{border-color:#6b3740;color:#ff9ba4}.capacity-summary.capacity-normal .capacity-state-badge{border-color:#2b6f62;color:#8ff1c3}.capacity-details{margin:-4px 0 12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#061019}.capacity-kpis{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px}.capacity-kpis>div{display:grid;gap:3px;padding:8px;border:1px solid #17384b;border-radius:8px;background:#081721}.capacity-kpis span{color:#789aac;font-size:9px}.capacity-kpis strong{font-size:12px}.capacity-metric-table{margin-top:9px;border:1px solid #17384b;border-radius:8px;overflow:hidden}.capacity-metric-row{display:grid;grid-template-columns:1.4fr 1fr 1fr .8fr;gap:8px;padding:7px 9px;border-bottom:1px solid #123042;color:#9db7c5;font-size:9px}.capacity-metric-row:last-child{border-bottom:0}.capacity-metric-head{color:#6f91a3;background:#07131d;font-weight:700}.capacity-metric-row.limiting{background:rgba(255,209,102,.06);color:#ffe795}.capacity-empty{padding:10px;color:#789aac;font-size:9px}.capacity-reference-row{margin-top:9px}.control-policy-grid small{color:#6f91a3;font-size:8px}.control-policy-grid input[readonly]{opacity:.65;cursor:not-allowed}.capacity-disabled .capacity-state-badge{color:#789aac}.capacity-not-configured .capacity-state-badge,.capacity-waiting .capacity-state-badge{color:#789aac}.capacity-live-inline{color:#9fc4d6!important;font-weight:650}.capacity-live-value{color:#eaf6ff;font-weight:700}.control-policy-head{margin-top:2px}@media(max-width:900px){.capacity-kpis{grid-template-columns:repeat(2,minmax(120px,1fr))}}@media(max-width:600px){.capacity-kpis{grid-template-columns:1fr}.capacity-metric-row{grid-template-columns:1.2fr 1fr 1fr .8fr;font-size:8px}.capacity-state-badge{margin-left:0}}
-.control-policy-panel{margin-top:12px;padding:12px;border:1px solid #284b60;border-radius:12px;background:#081721}.operator-control-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:6px 0 8px}.operator-control-head strong{font-size:10px}.operator-control-head span{color:#789aac;font-size:8px}.operator-control-grid{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:10px;margin-bottom:10px}.operator-control-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.operator-control-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.operator-control-grid small{color:#6f91a3;font-size:8px}.advanced-control-summary{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 10px;padding:9px 11px;border:1px solid #284b60;border-radius:10px;background:#07131d;color:#b9d6e5;cursor:pointer;text-align:left}.advanced-control-summary>span:first-child{display:grid;gap:3px}.advanced-control-summary strong{font-size:10px}.advanced-control-summary small{color:#789aac;font-size:8px}.advanced-control-details{padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#061019;margin-bottom:10px}.control-policy-readonly{display:grid;gap:5px;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#9db7c5;font-size:9px}.control-policy-readonly strong{color:#eaf6ff;font-size:12px}.control-policy-readonly small{color:#6f91a3;font-size:8px}.control-policy-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.control-policy-head strong{font-size:11px}.control-policy-head p{margin:4px 0 0;color:#789aac;font-size:9px;line-height:1.45}.control-policy-grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-top:10px}.control-policy-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.control-policy-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.control-reference-row span:first-child{border-color:#665c2d;color:#ffe795}@media(max-width:1100px){.control-policy-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}@media(max-width:700px){.control-policy-head{flex-direction:column}.control-policy-grid,.operator-control-grid{grid-template-columns:1fr}.operator-control-head{align-items:flex-start;flex-direction:column}}.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-head-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.grid-collapse-toggle{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:9px;font-weight:700;letter-spacing:.05em}.grid-collapsed-summary{margin:4px 0 0!important;color:#789aac!important;font-size:9px!important}.grid-impedance-details{margin-top:0}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.electrical-profile-row{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-top:12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#081721}.electrical-profile-info{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#789aac;font-size:9px}.profile-badge,.voltage-guard{padding:5px 7px;border:1px solid #665c2d;border-radius:999px;color:#ffe795}.profile-badge.calibrated{border-color:#2b6f62;color:#8ff1c3}.profile-badge.running{border-color:#58e7ff;color:#58e7ff}.voltage-guard.safe{border-color:#2b6f62;color:#8ff1c3}.voltage-guard.unsafe{border-color:#6b3740;color:#ff8c97}.calibration-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.calibration-actions button{padding:7px 9px;border:1px solid #58e7ff;border-radius:8px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:9px;font-weight:700}.calibration-actions button.cancel{border-color:#6b3740;color:#ff9ba4}.calibration-actions button:disabled{cursor:not-allowed;opacity:.45}.calibration-actions small{max-width:420px;color:#6f91a3;font-size:8px}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.electrical-profile-row{flex-direction:column;align-items:flex-start}.calibration-actions{justify-content:flex-start}.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.grid-head-actions{justify-content:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
+.capacity-summary{width:100%;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:9px 11px;border:1px solid #284b60;border-radius:10px;background:#07131d;color:#b9d6e5;cursor:pointer;text-align:left}.capacity-summary-title{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#789aac}.capacity-summary strong{font-size:14px;color:#eaf6ff}.capacity-summary span:not(.capacity-summary-title):not(.capacity-chevron):not(.capacity-state-badge){font-size:10px;color:#8daec0}.capacity-state-badge{margin-left:auto;padding:4px 7px;border:1px solid #36556a;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.06em}.capacity-chevron{font-size:20px;line-height:1;color:#9fc4d6;min-width:28px;text-align:center}.accordion-chevron{font-size:22px;font-weight:800;line-height:1;display:inline-flex;align-items:center;justify-content:center;min-width:30px;min-height:30px}.capacity-summary.capacity-warning{border-color:#665c2d}.capacity-summary.capacity-warning .capacity-state-badge{border-color:#665c2d;color:#ffe795}.capacity-summary.capacity-prelimit{border-color:#8f6a2c}.capacity-summary.capacity-prelimit .capacity-state-badge{border-color:#8f6a2c;color:#ffd166}.capacity-summary.capacity-critical,.capacity-summary.capacity-hard{border-color:#6b3740}.capacity-summary.capacity-critical .capacity-state-badge,.capacity-summary.capacity-hard .capacity-state-badge{border-color:#6b3740;color:#ff9ba4}.capacity-summary.capacity-normal .capacity-state-badge{border-color:#2b6f62;color:#8ff1c3}.capacity-details{margin:-4px 0 12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#061019}.capacity-kpis{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px}.capacity-kpis>div{display:grid;gap:3px;padding:8px;border:1px solid #17384b;border-radius:8px;background:#081721}.capacity-kpis span{color:#789aac;font-size:9px}.capacity-kpis strong{font-size:12px}.capacity-metric-table{margin-top:9px;border:1px solid #17384b;border-radius:8px;overflow:hidden}.capacity-metric-row{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr .75fr;gap:8px;padding:7px 9px;border-bottom:1px solid #123042;color:#9db7c5;font-size:9px}.capacity-metric-row:last-child{border-bottom:0}.capacity-metric-head{color:#6f91a3;background:#07131d;font-weight:700}.capacity-metric-row.limiting{background:rgba(255,209,102,.06);color:#ffe795}.capacity-empty{padding:10px;color:#789aac;font-size:9px}.capacity-reference-row{margin-top:9px}.control-policy-grid small{color:#6f91a3;font-size:8px}.control-policy-grid input[readonly]{opacity:.65;cursor:not-allowed}.capacity-disabled .capacity-state-badge{color:#789aac}.capacity-not-configured .capacity-state-badge,.capacity-waiting .capacity-state-badge{color:#789aac}.capacity-live-inline{color:#9fc4d6!important;font-weight:650}.capacity-live-inline.stale{color:#ffd166!important}.capacity-live-value{color:#eaf6ff;font-weight:700}.capacity-live-value small{display:block;margin-top:2px;color:#6f91a3;font-size:7px}.modeled-value{color:#8ff1c3}.last-known-label{display:block;margin-top:2px;color:#ffd166;font-size:7px;letter-spacing:.06em}.capacity-stale-note{border-color:#665c2d;color:#ffe795}.control-policy-error{margin:8px 0;padding:8px 10px;border:1px solid #6b3740;border-radius:9px;color:#ff9ba4;background:#211014;font-size:9px;line-height:1.45}.control-policy-head{margin-top:2px}@media(max-width:900px){.capacity-kpis{grid-template-columns:repeat(2,minmax(120px,1fr))}}@media(max-width:600px){.capacity-kpis{grid-template-columns:1fr}.capacity-metric-row{grid-template-columns:1.1fr .9fr .9fr .9fr .7fr;font-size:8px}.capacity-state-badge{margin-left:0}}
+.control-policy-panel{margin-top:12px;padding:12px;border:1px solid #284b60;border-radius:12px;background:#081721}.operator-adjustability-summary{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 10px;padding:9px 11px;border:1px solid #284b60;border-radius:10px;background:#07131d;color:#b9d6e5;cursor:pointer;text-align:left}.operator-adjustability-summary>span:first-child{display:grid;gap:3px}.operator-adjustability-summary strong{font-size:10px}.operator-adjustability-summary small{color:#789aac;font-size:8px}.operator-adjustability-details{padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#061019;margin-bottom:10px}.operator-control-grid{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:10px;margin-bottom:0}.operator-control-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.operator-control-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.operator-control-grid small{color:#6f91a3;font-size:8px}.adjustability-error{color:#ff9ba4!important}.adjustability-helper{display:grid;gap:4px;margin-top:3px;padding:9px;border:1px solid #284b60;border-radius:9px;background:#081721;color:#8daec0}.adjustability-helper strong{color:#eaf6ff;font-size:9px}.adjustability-helper span{padding:4px 6px;border:1px solid #17384b;border-radius:6px;font-size:8px}.adjustability-helper span.active{border-color:#58e7ff;color:#eaf6ff;background:#0b2635}.adjustability-helper small{margin-top:3px;line-height:1.4}.advanced-control-summary{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 10px;padding:9px 11px;border:1px solid #284b60;border-radius:10px;background:#07131d;color:#b9d6e5;cursor:pointer;text-align:left}.advanced-control-summary>span:first-child{display:grid;gap:3px}.advanced-control-summary strong{font-size:10px}.advanced-control-summary small{color:#789aac;font-size:8px}.advanced-control-details{padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#061019;margin-bottom:10px}.control-policy-readonly{display:grid;gap:5px;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#9db7c5;font-size:9px}.control-policy-readonly strong{color:#eaf6ff;font-size:12px}.control-policy-readonly small{color:#6f91a3;font-size:8px}.control-policy-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.control-policy-head strong{font-size:11px}.control-policy-head p{margin:4px 0 0;color:#789aac;font-size:9px;line-height:1.45}.control-policy-grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-top:10px}.control-policy-grid label{display:grid;gap:5px;color:#9db7c5;font-size:9px}.control-policy-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.control-reference-row span:first-child{border-color:#665c2d;color:#ffe795}@media(max-width:1100px){.control-policy-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}@media(max-width:700px){.control-policy-head{flex-direction:column}.control-policy-grid,.operator-control-grid{grid-template-columns:1fr}.operator-control-head{align-items:flex-start;flex-direction:column}}.dashboard{max-width:1540px;margin:0 auto;padding:20px;color:#eaf6ff}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:5px 20px;border:1px solid #1b3a4e;border-radius:20px;background:rgba(7,19,31,.82);box-shadow:0 20px 60px rgba(0,0,0,.25)}.topbar h1{margin:0;font-size:18px;letter-spacing:.28em}.topbar p{margin:4px 0 0;color:#83a7bd;font-size:10px;letter-spacing:.12em;text-transform:uppercase}.runtime-switch{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.runtime-label{font-size:9px;color:#6f91a3;letter-spacing:.14em}.runtime-fixed{padding:7px 10px;border:1px solid #58e7ff;border-radius:999px;color:#eaf6ff;background:#103044;font-size:10px;font-weight:700}.runtime-version{padding:6px 9px;border:1px solid #36556a;border-radius:999px;color:#88a9ba;background:#081721;font-size:9px}.runtime-status{padding:6px 9px;border-radius:999px;border:1px solid #284b60;font-size:9px;letter-spacing:.08em}.runtime-status.online{color:#8ff1c3;border-color:#2b6f62}.runtime-status.offline{color:#ff8c97;border-color:#6b3740}.startup-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.startup-panel.ready{border-color:#2b6f62}.startup-panel.timeout,.startup-panel.fault{border-color:#6b3740}.startup-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.startup-head strong{font-size:12px}.startup-head p{margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.startup-actions{display:flex;align-items:center;gap:8px}.startup-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.startup-badge{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.startup-panel.ready .startup-badge{border-color:#2b6f62;color:#8ff1c3}.startup-panel.timeout .startup-badge,.startup-panel.fault .startup-badge{border-color:#6b3740;color:#ff9ba4}.startup-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.startup-checks span{padding:5px 8px;border:1px solid #3b4450;border-radius:999px;color:#8399a7;font-size:9px}.startup-checks span.ok{border-color:#2b6f62;color:#8ff1c3}.startup-warning{margin:10px 0 0;padding:8px 10px;border:1px solid #665c2d;border-radius:10px;color:#ffe795;background:#17170d;font-size:10px;line-height:1.5}.grid-impedance-panel{margin-top:14px;padding:14px 16px;border:1px solid #3a5364;border-radius:16px;background:#0b1822}.grid-panel-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.grid-head-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.grid-collapse-toggle{padding:4px 8px;display:inline-flex;align-items:center;gap:4px;min-height:34px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:9px;font-weight:700;letter-spacing:.05em}.grid-collapsed-summary{margin:4px 0 0!important;color:#789aac!important;font-size:9px!important}.grid-impedance-details{margin-top:0}.grid-panel-head strong{font-size:12px}.grid-panel-head p{max-width:950px;margin:4px 0 0;color:#89a8b9;font-size:10px;line-height:1.5}.grid-provenance{padding:5px 8px;border:1px solid #665c2d;border-radius:999px;color:#ffe795;font-size:9px;letter-spacing:.08em}.grid-preset-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:12px;color:#789aac;font-size:10px}.grid-preset-actions button{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer;font-size:10px}.grid-preset-actions button.selected{border-color:#58e7ff;color:#eaf6ff}.grid-name{margin-left:auto;color:#b9d6e5}.grid-parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:12px}.grid-parameter-grid label{display:grid;gap:5px;color:#9db7c5;font-size:10px}.grid-parameter-grid input{width:100%;padding:8px 9px;border:1px solid #284b60;border-radius:9px;background:#07131d;color:#eaf6ff;font:inherit}.grid-derived{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#7598aa;font-size:10px}.grid-derived span{padding:5px 7px;border:1px solid #1f3b4d;border-radius:8px;background:#081721}.electrical-profile-row{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-top:12px;padding:10px;border:1px solid #1f3b4d;border-radius:10px;background:#081721}.electrical-profile-info{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#789aac;font-size:9px}.profile-badge,.voltage-guard{padding:5px 7px;border:1px solid #665c2d;border-radius:999px;color:#ffe795}.profile-badge.calibrated{border-color:#2b6f62;color:#8ff1c3}.profile-badge.running{border-color:#58e7ff;color:#58e7ff}.voltage-guard.safe{border-color:#2b6f62;color:#8ff1c3}.voltage-guard.unsafe{border-color:#6b3740;color:#ff8c97}.voltage-guard.unknown{border-color:#3b5364;color:#8daec0}.calibration-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.calibration-actions button{padding:7px 9px;border:1px solid #58e7ff;border-radius:8px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:9px;font-weight:700}.calibration-actions button.cancel{border-color:#6b3740;color:#ff9ba4}.calibration-actions button:disabled{cursor:not-allowed;opacity:.45}.calibration-actions small{max-width:420px;color:#6f91a3;font-size:8px}.topbar-meta{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:6px 9px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.chip.measured{border-color:#2b6f62;color:#8ff1c3}.chip.active{border-color:#2b6f62;color:#8ff1c3}.section,.agent-section{margin-top:14px}.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:stretch}.overview-grid>*{min-width:0}.footer-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding:0 4px;color:#6f91a3;font-size:10px}.footer-meta button{margin-left:5px;padding:4px 8px;border:1px solid #284b60;border-radius:999px;color:#8daec0;background:#081721;cursor:pointer}.footer-meta button.selected{border-color:#58e7ff;color:#eaf6ff}@media(max-width:1100px){.overview-grid{grid-template-columns:1fr}.startup-head{flex-direction:column}.grid-parameter-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.grid-name{margin-left:0}}@media(max-width:700px){.electrical-profile-row{flex-direction:column;align-items:flex-start}.calibration-actions{justify-content:flex-start}.dashboard{padding:10px}.topbar,.footer-meta,.grid-panel-head{flex-direction:column;align-items:flex-start}.grid-head-actions{justify-content:flex-start}.runtime-switch{justify-content:flex-start}.grid-parameter-grid{grid-template-columns:1fr}}
 </style>

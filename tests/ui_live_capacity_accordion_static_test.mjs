@@ -18,5 +18,8 @@ assert.match(dash, /Advanced Control Parameters/);
 assert.match(vuf, /points\.length < 1/);
 assert.match(vuf, /Math\.max\(plotLeft, mapX\(first\.ts\)\)/);
 assert.match(vuf, /constant VUF/i);
+assert.match(vuf, /valid: false/);
+assert.match(vuf, /gap marker/i);
+assert.match(dash, /STALE DATA|capacityDataFresh/);
 
 console.log('ui_live_capacity_accordion_static_test: PASS');

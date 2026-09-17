@@ -1,3 +1,5 @@
+import { resolveControlPolicyThresholds } from './ControlPolicyConfig.js';
+
 /*
  * Senergate Capacity Supervisor + operator adjustability rules.
  *
@@ -6,12 +8,14 @@
  * 100% is the configured project hard limit, not a universal statutory value.
  *
  * IMPORTANT UI/runtime contract:
- * - Live P/L1/L2/L3 values are reported even when the corresponding hard limit
- *   is 0 / not configured.
- * - A limit of 0 disables only that capacity constraint; it must never hide the
- *   underlying measurement.
+ * - Prototype MEASURED values remain visible as physical-reference data.
+ * - Capacity Usage is calculated from Building-Twin MODELED values, not from
+ *   the small prototype currents. This makes configured building limits (for
+ *   example L1 max = 10 A) compare against the simulated building L1 current.
+ * - A limit of 0 disables only that capacity constraint; it never hides either
+ *   MEASURED or MODELED values.
  * - Partial limit configuration is allowed. Only metrics with a positive limit
- *   and a finite live value participate in Capacity Usage / Headroom.
+ *   and a finite modeled value participate in Capacity Usage / Headroom.
  */
 
 export const positiveNumberOrZero = value => {
@@ -20,6 +24,7 @@ export const positiveNumberOrZero = value => {
 };
 
 export const finiteNumberOrNull = value => {
+  if (value === null || value === undefined || value === '') return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
 };
@@ -70,22 +75,29 @@ export const phaseCurrentLimitA = (policy, phase) => {
   return positiveNumberOrZero(policy?.siteMaxPhaseCurrentA);
 };
 
-const buildMetric = ({ key, label, actual, limit, unit, source }) => {
-  const safeActual = finiteNumberOrNull(actual);
+const buildMetric = ({ key, label, measured, modeled, limit, unit, source, dataFresh = true }) => {
+  const safeMeasured = finiteNumberOrNull(measured);
+  const safeModeled = finiteNumberOrNull(modeled);
   const safeLimit = positiveNumberOrZero(limit) || null;
-  const ratio = safeActual !== null && safeLimit !== null
-    ? safeActual / safeLimit
+  const ratio = dataFresh && safeModeled !== null && safeLimit !== null
+    ? safeModeled / safeLimit
     : null;
 
   return {
     key,
     label,
-    actual: safeActual,
+    measured: safeMeasured,
+    modeled: safeModeled,
+    // Backward-compatible alias. Capacity semantics now define `actual` as the
+    // Building-Twin value used by the capacity denominator comparison.
+    actual: safeModeled,
     limit: safeLimit,
     unit,
     ratio,
     configured: safeLimit !== null,
-    live: safeActual !== null,
+    live: dataFresh && safeModeled !== null,
+    lastKnown: safeMeasured !== null || safeModeled !== null,
+    fresh: dataFresh === true,
     source,
   };
 };
@@ -94,40 +106,56 @@ export const computeCapacityStatus = ({
   policy = {},
   measuredCurrents = {},
   measuredTotalPowerW = null,
+  modeledCurrents = null,
+  modeledTotalPowerW = null,
+  dataFresh = true,
 } = {}) => {
+  // Compatibility for unit tests / older callers: when no explicit modeled
+  // source is supplied, fall back to measured values. The production dashboard
+  // always supplies Building-Twin modeled values.
+  const effectiveModeledCurrents = modeledCurrents ?? measuredCurrents;
+  const effectiveModeledPowerW = modeledTotalPowerW ?? measuredTotalPowerW;
   // Keep a stable four-row metric set for the UI regardless of limit state.
   const metrics = [
     buildMetric({
       key: 'TOTAL_POWER',
       label: 'Total Power',
-      actual: measuredTotalPowerW,
+      measured: measuredTotalPowerW,
+      modeled: effectiveModeledPowerW,
       limit: positiveNumberOrZero(policy.siteMaxTotalPowerW),
       unit: 'W',
       source: 'Site / DSO / TAB / installation configuration',
+      dataFresh,
     }),
     buildMetric({
       key: 'A_CURRENT',
       label: 'L1 Current',
-      actual: measuredCurrents?.a,
+      measured: measuredCurrents?.a,
+      modeled: effectiveModeledCurrents?.a,
       limit: phaseCurrentLimitA(policy, 'a'),
       unit: 'A',
       source: 'Site / protection / cable / TAB configuration',
+      dataFresh,
     }),
     buildMetric({
       key: 'B_CURRENT',
       label: 'L2 Current',
-      actual: measuredCurrents?.b,
+      measured: measuredCurrents?.b,
+      modeled: effectiveModeledCurrents?.b,
       limit: phaseCurrentLimitA(policy, 'b'),
       unit: 'A',
       source: 'Site / protection / cable / TAB configuration',
+      dataFresh,
     }),
     buildMetric({
       key: 'C_CURRENT',
       label: 'L3 Current',
-      actual: measuredCurrents?.c,
+      measured: measuredCurrents?.c,
+      modeled: effectiveModeledCurrents?.c,
       limit: phaseCurrentLimitA(policy, 'c'),
       unit: 'A',
       source: 'Site / protection / cable / TAB configuration',
+      dataFresh,
     }),
   ];
 
@@ -140,13 +168,18 @@ export const computeCapacityStatus = ({
   const usageRatio = limitingMetric?.ratio ?? null;
   const remainingRatio = usageRatio === null ? null : Math.max(0, 1 - usageRatio);
 
-  const warning = Number.isFinite(Number(policy.warningRatio)) ? Number(policy.warningRatio) : 0.80;
-  const preLimit = Number.isFinite(Number(policy.preLimitRatio)) ? Number(policy.preLimitRatio) : 0.90;
-  const critical = Number.isFinite(Number(policy.criticalRatio)) ? Number(policy.criticalRatio) : 0.95;
-  const hard = Number.isFinite(Number(policy.hardRatio)) ? Number(policy.hardRatio) : 1.00;
+  const thresholdResolution = resolveControlPolicyThresholds(policy);
+  const warning = thresholdResolution.values.warningRatio;
+  const preLimit = thresholdResolution.values.preLimitRatio;
+  const critical = thresholdResolution.values.criticalRatio;
+  const hard = thresholdResolution.values.hardRatio;
+
+  const anyMeasurement = metrics.some(metric => metric.lastKnown);
 
   let state;
-  if (configuredMetrics.length === 0) {
+  if (dataFresh !== true && anyMeasurement) {
+    state = { key: 'stale', label: 'STALE DATA' };
+  } else if (configuredMetrics.length === 0) {
     state = { key: 'not-configured', label: 'LIMITS NOT CONFIGURED' };
   } else if (activeMetrics.length === 0) {
     state = { key: 'waiting', label: 'WAITING DATA' };
@@ -175,6 +208,9 @@ export const computeCapacityStatus = ({
     usageRatio,
     remainingRatio,
     state,
+    dataFresh: dataFresh === true,
+    thresholdConfigurationValid: thresholdResolution.valid,
+    thresholdErrors: thresholdResolution.errors,
   };
 };
 

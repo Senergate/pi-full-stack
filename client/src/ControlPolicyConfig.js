@@ -91,6 +91,70 @@ export const ADAPTIVE_PARAMETER_KEYS = Object.freeze([
   'minVufImprovementPct',
 ]);
 
+export const CONTROL_THRESHOLD_KEYS = Object.freeze([
+  'vufEnterPct',
+  'vufExitPct',
+  'warningRatio',
+  'preLimitRatio',
+  'criticalRatio',
+  'hardRatio',
+]);
+
+const finiteThreshold = (policy, key, fallback) => {
+  const numeric = Number(policy?.[key]);
+  return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+export const validateControlPolicyThresholds = (policy = {}) => {
+  const values = {
+    vufEnterPct: finiteThreshold(policy, 'vufEnterPct', CONTROL_POLICY_DEFAULTS.vufEnterPct),
+    vufExitPct: finiteThreshold(policy, 'vufExitPct', CONTROL_POLICY_DEFAULTS.vufExitPct),
+    warningRatio: finiteThreshold(policy, 'warningRatio', CONTROL_POLICY_DEFAULTS.warningRatio),
+    preLimitRatio: finiteThreshold(policy, 'preLimitRatio', CONTROL_POLICY_DEFAULTS.preLimitRatio),
+    criticalRatio: finiteThreshold(policy, 'criticalRatio', CONTROL_POLICY_DEFAULTS.criticalRatio),
+    hardRatio: finiteThreshold(policy, 'hardRatio', CONTROL_POLICY_DEFAULTS.hardRatio),
+  };
+
+  const errors = [];
+  if (!(values.vufEnterPct > 0)) errors.push('VUF Enter must be > 0.');
+  if (!(values.vufExitPct >= 0 && values.vufExitPct < values.vufEnterPct)) {
+    errors.push('VUF Exit must be >= 0 and strictly below VUF Enter.');
+  }
+  if (!(values.warningRatio > 0 && values.warningRatio < values.preLimitRatio)) {
+    errors.push('Capacity Warning must be > 0 and below Pre-Limit.');
+  }
+  if (!(values.preLimitRatio < values.criticalRatio)) {
+    errors.push('Capacity Pre-Limit must be below Critical.');
+  }
+  if (!(values.criticalRatio < values.hardRatio)) {
+    errors.push('Capacity Critical must be below Hard.');
+  }
+  if (!(values.hardRatio === 1.0)) {
+    errors.push('Capacity Hard is fixed at 100%.');
+  }
+
+  return { valid: errors.length === 0, values, errors };
+};
+
+export const resolveControlPolicyThresholds = (policy = {}) => {
+  const validation = validateControlPolicyThresholds(policy);
+  if (validation.valid) return { ...validation, usedDefaults: false };
+
+  return {
+    valid: false,
+    usedDefaults: true,
+    errors: validation.errors,
+    values: {
+      vufEnterPct: CONTROL_POLICY_DEFAULTS.vufEnterPct,
+      vufExitPct: CONTROL_POLICY_DEFAULTS.vufExitPct,
+      warningRatio: CONTROL_POLICY_DEFAULTS.warningRatio,
+      preLimitRatio: CONTROL_POLICY_DEFAULTS.preLimitRatio,
+      criticalRatio: CONTROL_POLICY_DEFAULTS.criticalRatio,
+      hardRatio: CONTROL_POLICY_DEFAULTS.hardRatio,
+    },
+  };
+};
+
 export const cloneControlPolicyDefaults = strategy => ({
   ...CONTROL_POLICY_DEFAULTS,
   strategy: strategy ?? CONTROL_POLICY_DEFAULTS.strategy,

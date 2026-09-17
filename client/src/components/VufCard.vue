@@ -41,7 +41,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { classifyVuf, formatVufPercent, numberOrNullVuf } from '../VufPresentation.js';
+import { classifyVuf, formatSignedVufDeltaPercent, formatVufPercent, numberOrNullVuf } from '../VufPresentation.js';
 
 const props = defineProps({
   vuf: {
@@ -90,7 +90,7 @@ const safeVuf = computed(() => numberOrNullVuf(props.vuf));
 const formatPercent = value => formatVufPercent(value);
 const formattedVuf = computed(() => formatVufPercent(safeVuf.value));
 const formattedBaseline = computed(() => formatVufPercent(props.baselineVuf));
-const formattedLoadImpact = computed(() => formatVufPercent(props.loadImpactVuf));
+const formattedLoadImpact = computed(() => formatSignedVufDeltaPercent(props.loadImpactVuf));
 
 const status = computed(() => classifyVuf(safeVuf.value));
 const statusLabel = computed(() => status.value.label.toUpperCase());
@@ -106,17 +106,23 @@ const gaugeWidth = computed(() =>
 );
 
 const addPoint = value => {
-  if (value === null || value === undefined || value === '') {
-    return;
-  }
-
+  const ts = performance.now();
   const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) return;
+  const valid = value !== null && value !== undefined && value !== '' && Number.isFinite(numericValue);
 
-  graphState.data.push({
-    ts: performance.now(),
-    vuf: Math.max(0, numericValue),
-  });
+  if (!valid) {
+    // Insert one explicit gap marker. This stops a previously valid flat line
+    // from being extended to "now" while data is unavailable, but preserves
+    // the earlier history on the left side of the 10-second window.
+    const last = graphState.data[graphState.data.length - 1];
+    if (!last || last.valid !== false) graphState.data.push({ ts, vuf: null, valid: false });
+  } else {
+    graphState.data.push({
+      ts,
+      vuf: Math.max(0, numericValue),
+      valid: true,
+    });
+  }
 
   if (graphState.data.length > MAX_POINTS) {
     graphState.data.splice(0, graphState.data.length - MAX_POINTS);
@@ -219,73 +225,49 @@ const drawThreshold = (ctx, mapY, padding, width) => {
 };
 
 const drawLine = (ctx, points, mapX, mapY, plotLeft, plotTop, plotWidth, plotHeight) => {
-  if (points.length < 1) {
-    return;
-  }
+  if (points.length < 1) return;
 
-  /*
-   * Restrict everything drawn below to the actual
-   * plotting region.
-   *
-   * The first point is intentionally allowed to exist
-   * before the visible time window. Canvas then clips
-   * the line exactly where it crosses the left edge.
-   */
   ctx.save();
-
   ctx.beginPath();
-
   ctx.rect(plotLeft, plotTop, plotWidth, plotHeight);
-
   ctx.clip();
 
-  ctx.beginPath();
+  const strokeSegment = (segment, endTs) => {
+    if (segment.length < 1) return;
 
-  /*
-   * A constant VUF may not trigger the Vue watcher for more than 10 seconds.
-   * In that case graphState intentionally contains only the last known point.
-   * Start the line at the visible left boundary when that point is older than
-   * the window, then extend the last known value to "now". This keeps a
-   * constant VUF visible instead of making the chart disappear after 10 s.
-   */
-  const first = points[0];
-  const firstX = Math.max(plotLeft, mapX(first.ts));
-  ctx.moveTo(firstX, mapY(first.vuf));
+    ctx.beginPath();
+    const first = segment[0];
+    const firstX = Math.max(plotLeft, mapX(first.ts));
+    ctx.moveTo(firstX, mapY(first.vuf));
 
-  for (let i = 1; i < points.length; i += 1) {
-    ctx.lineTo(mapX(points[i].ts), mapY(points[i].vuf));
+    for (let i = 1; i < segment.length; i += 1) {
+      ctx.lineTo(mapX(segment[i].ts), mapY(segment[i].vuf));
+    }
+
+    const last = segment[segment.length - 1];
+    if (endTs > last.ts) ctx.lineTo(mapX(endTs), mapY(last.vuf));
+
+    ctx.strokeStyle = '#58e7ff';
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  };
+
+  let segment = [];
+  for (const point of points) {
+    if (point.valid === false || !Number.isFinite(point.vuf)) {
+      if (segment.length > 0) strokeSegment(segment, point.ts);
+      segment = [];
+      continue;
+    }
+    segment.push(point);
   }
 
-  ctx.lineTo(mapX(performance.now()), mapY(points[points.length - 1].vuf));
-
-  ctx.strokeStyle = '#58e7ff';
-
-  ctx.lineWidth = 2.5;
-
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-
-  ctx.stroke();
-
-  //
-  // /*
-  //  * Only draw the current-value dot when the last
-  //  * point itself is inside the graph area.
-  //  */
-  // const last = points[points.length - 1];
-  //
-  // const x = mapX(last.ts);
-  // const y = mapY(last.vuf);
-  //
-  // if (x >= plotLeft && x <= plotLeft + plotWidth) {
-  //   ctx.beginPath();
-  //
-  //   ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-  //
-  //   ctx.fillStyle = '#58e7ff';
-  //
-  //   ctx.fill();
-  // }
+  // A constant VUF remains visible by extending a valid trailing segment.
+  // Only a currently valid trailing segment is extended to "now". If the
+  // most recent sample is an invalid/gap marker, no stale line is synthesized.
+  if (segment.length > 0) strokeSegment(segment, performance.now());
 
   ctx.restore();
 };

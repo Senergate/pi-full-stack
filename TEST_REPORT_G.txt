@@ -1,0 +1,58 @@
+Senergate v1.5.1 AI CONTROL G - TEST REPORT
+Date: 2026-09-17
+
+PASS agent_candidate_strategy_static_test.mjs
+PASS agent_manual_patch_static_test.mjs
+PASS agent_modeled_capacity_static_test.mjs
+PASS agent_voltage_guard_static_test.mjs
+PASS battery_priority_control_static_test.mjs
+PASS branchA_command_status_race_test.mjs
+PASS branchA_correlation_static_test.mjs
+PASS branchA_immediate_twin_projection_test.mjs
+PASS branchA_status_adapter_static_test.mjs
+PASS branchA_status_target_projection_test.mjs
+PASS branchb_shelly_readiness_static_test.mjs
+PASS bugfix3_smoke_test.mjs
+PASS building_capacity_modeled_basis_test.mjs
+PASS building_twin_model_test.mjs
+PASS capacity_adjustability_static_test.mjs
+PASS capacity_formula_static_test.mjs
+PASS capacity_live_metrics_test.mjs
+PASS capacity_stale_data_test.mjs
+PASS capacity_supervisor_behavior_test.mjs
+PASS control_policy_validation_test.mjs
+PASS control_regression_restore_static_test.mjs
+PASS current_card_measured_modeled_static_test.mjs
+PASS electrical_calibration_service_static_test.mjs
+PASS equivalent_device_no_gain_static_test.mjs
+PASS frontend_build_version_static_test.mjs
+PASS heatpump_command_contract_test.mjs
+PASS incremental_pcc_model_static_test.mjs
+PASS measurement_validity_test.mjs
+PASS monotonic_downshift_invariant_test.mjs
+PASS operator_adjustability_accordion_static_test.mjs
+PASS p03_branchA_semantics_restore_test.mjs
+PASS pending_timeout_static_test.mjs
+PASS pi5_heartbeat_static_test.mjs
+PASS pq_profile_model_test.mjs
+PASS real_hardware_vuf_demo_test.mjs
+PASS real_only_frontend_static_test.mjs
+PASS recheck_preserve_state_static_test.mjs
+PASS stability_data_semantics_static_test.mjs
+PASS startup_display_null_gate_static_test.mjs
+PASS startup_initialization_static_test.mjs
+PASS static_heatpump_no_legacy_path_test.mjs
+PASS ui_live_capacity_accordion_static_test.mjs
+PASS vue_import_usage_static_test.mjs
+PASS vuf_presentation_consistency_test.mjs
+PASS wallbox_break_before_make_static_test.mjs
+
+TEST_COUNT=45 TEST_PASS=45 TEST_FAIL=0
+
+Syntax checks:
+PASS CapacitySupervisor.js
+PASS SimpleDashboard.vue <script setup>
+PASS AgentCard.vue <script setup>
+PASS VufCard.vue <script setup>
+
+Production Vite build: not executed in the isolated artifact environment. Run npm ci && npm run build on Pi5/networked dev environment before deployment.
