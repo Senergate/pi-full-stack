@@ -54,6 +54,12 @@
       </div>
     </div>
 
+    <div v-if="hardLimitOverrideActive" class="hard-limit-override-alert">
+      <strong>⚠ HARD LIMIT OVERRIDE ACTIVE</strong>
+      <span>Building Capacity hard limit has priority over Operator Adjustability / Das Kapazitäts-Hard-Limit hat Vorrang vor der Bedien-Eingriffsgrenze.</span>
+      <span v-if="hardLimitOverrideAsset">{{ hardLimitOverrideAssetLabel }} · configured {{ hardLimitOverrideConfiguredFloorLabel }} · emergency target {{ hardLimitOverrideEffectiveLevelLabel }}</span>
+    </div>
+
     <div class="section-head">
       <div>
         <div class="panel-label">Control decision</div>
@@ -188,7 +194,7 @@ const props = defineProps({
   batteryMeasuredCurrentA: { type: Number, required: false, default: null },
 });
 
-const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold', 'heatpump-stop', 'state-change']);
+const emit = defineEmits(['apply-state', 'enabled-change', 'heatpump-zero-hold', 'heatpump-stop', 'state-change', 'hard-limit-override-change']);
 
 const autoEnabled = ref(false);
 const agentState = ref('inactive');
@@ -294,6 +300,24 @@ const batteryEffectiveness = computed(() => classifyBatteryEffectiveness({
 const awaitingAiExecution = ref(false);
 const aiActionDevice = ref(null);
 const imbalanceLatched = ref(false);
+const hardLimitOverrideActive = ref(false);
+const hardLimitOverrideAsset = ref(null);
+const hardLimitOverrideConfiguredFloorLabel = ref('--');
+const hardLimitOverrideEffectiveLevelLabel = ref('--');
+const hardLimitOverrideAssetLabel = computed(() => hardLimitOverrideAsset.value === 'heatpump' ? 'Heatpump' : hardLimitOverrideAsset.value === 'wallbox' ? 'Wallbox' : '');
+
+const setHardLimitOverride = ({ active, asset = null, configuredFloor = '--', effectiveLevel = '--' } = {}) => {
+  hardLimitOverrideActive.value = active === true;
+  hardLimitOverrideAsset.value = hardLimitOverrideActive.value ? asset : null;
+  hardLimitOverrideConfiguredFloorLabel.value = hardLimitOverrideActive.value ? String(configuredFloor) : '--';
+  hardLimitOverrideEffectiveLevelLabel.value = hardLimitOverrideActive.value ? String(effectiveLevel) : '--';
+  emit('hard-limit-override-change', {
+    active: hardLimitOverrideActive.value,
+    asset: hardLimitOverrideAsset.value,
+    configuredFloor: hardLimitOverrideConfiguredFloorLabel.value,
+    effectiveLevel: hardLimitOverrideEffectiveLevelLabel.value,
+  });
+};
 
 /*
  * Device segments show either the last ESP32-confirmed state or an outstanding
@@ -477,6 +501,29 @@ const getReductionCandidates = current => {
   return candidates;
 };
 
+const getHardLimitOverrideCandidates = current => {
+  const candidates = [];
+
+  // HARD-LIMIT OVERRIDE: only Operator Adjustability may be bypassed. The
+  // physical/semantic minimum remains Level 1 for Heatpump and Wallbox; STOP,
+  // ZERO_HOLD and Wallbox OFF are not introduced by this protection fallback.
+  if (current.heatpump > 1) candidates.push({ ...current, heatpump: current.heatpump - 1 });
+  if (current.wallbox > 1) candidates.push({ ...current, wallbox: current.wallbox - 1 });
+  if (current.batteryCharging) candidates.push({ ...current, batteryCharging: false });
+  return candidates;
+};
+
+const candidateOverridesOperatorAdjustability = (current, candidate) => {
+  const key = actionDelta(current, candidate);
+  if (key === 'heatpump') {
+    return heatpumpLocked.value || heatpumpMinAllowedLevel.value === null || candidate.heatpump < heatpumpMinAllowedLevel.value;
+  }
+  if (key === 'wallbox') {
+    return wallboxLocked.value || wallboxMinAllowedLevel.value === null || candidate.wallbox < wallboxMinAllowedLevel.value;
+  }
+  return false;
+};
+
 const getCompensationCandidates = current => {
   // AI_CONTROL_INVARIANT:
   // Heatpump and Wallbox are monotonic non-increasing under automatic control.
@@ -599,6 +646,26 @@ const chooseNextAction = async () => {
           reason: actionDelta(current, best.state) === 'batteryCharging'
             ? 'hard_limit_battery_off'
             : 'hard_limit_derating',
+        };
+      }
+
+      // No capacity-reducing candidate remains inside the configured Operator
+      // Adjustability boundary. At the HARD limit only, allow one additional
+      // downshift step below that operator floor. All other invariants remain:
+      // one device per cycle, downshift-only, voltage guard, execution ACK and
+      // settling. Heatpump/Wallbox never go below Level 1 here.
+      const overrideCandidates = (await evaluateCapacityCandidates(getHardLimitOverrideCandidates(current)))
+        .filter(result => candidateOverridesOperatorAdjustability(current, result.state));
+      if (overrideCandidates.length > 0) {
+        overrideCandidates.sort((a, b) =>
+          (b.capacityRelief - a.capacityRelief) ||
+          (a.vuf - b.vuf)
+        );
+        const best = overrideCandidates[0];
+        return {
+          ...best,
+          reason: 'hard_limit_operator_override',
+          overrideAsset: actionDelta(current, best.state),
         };
       }
     } else {
@@ -764,7 +831,9 @@ const selectAndApplyState = async (repeatedViolation, trigger = 'vuf') => {
         addLog(
           'No permitted adjustment found',
           trigger === 'capacity'
-            ? 'No voltage-safe permitted one-step action is currently predicted to reduce Building Capacity inside the configured adjustability limits.'
+            ? (capacityUsageRatio.value !== null && capacityUsageRatio.value >= hardRatio.value
+              ? 'Building Capacity is at/above HARD limit, but no voltage-safe one-step reduction remains. Operator Adjustability override was considered down to Level 1 for Heatpump/Wallbox.'
+              : 'No voltage-safe permitted one-step action is currently predicted to reduce Building Capacity inside the configured adjustability limits.')
             : 'No voltage-safe permitted one-step action is currently predicted to improve VUF. Heatpump/Wallbox automatic upshift is forbidden.',
           'warning'
         );
@@ -772,8 +841,28 @@ const selectAndApplyState = async (repeatedViolation, trigger = 'vuf') => {
       return;
     }
 
-    prediction.value = action;
     const current = normalizedDeviceStates.value;
+    if (action.reason === 'hard_limit_operator_override') {
+      const asset = action.overrideAsset ?? actionDelta(current, action.state);
+      const configuredFloor = asset === 'heatpump'
+        ? (heatpumpLocked.value ? 'LOCKED' : `L${heatpumpMinAllowedLevel.value}`)
+        : asset === 'wallbox'
+          ? (wallboxLocked.value ? 'LOCKED' : `L${wallboxMinAllowedLevel.value}`)
+          : '--';
+      const effectiveLevel = asset === 'heatpump'
+        ? `L${action.state.heatpump}`
+        : asset === 'wallbox'
+          ? `L${action.state.wallbox}`
+          : '--';
+      setHardLimitOverride({ active: true, asset, configuredFloor, effectiveLevel });
+      addLog(
+        'HARD LIMIT overrides Operator Adjustability',
+        `${asset === 'heatpump' ? 'Heatpump' : 'Wallbox'} is reduced below the configured operator boundary because Building Capacity is at/above 100%. Configured value is preserved; only the runtime boundary is temporarily overridden.`,
+        'critical'
+      );
+    }
+
+    prediction.value = action;
 
     // Final execution-boundary invariant. Even if a future candidate source is
     // added without the normal candidate filter, automatic control must never
@@ -801,9 +890,11 @@ const selectAndApplyState = async (repeatedViolation, trigger = 'vuf') => {
     addLog(
       action.reason === 'battery_priority'
         ? 'Battery-priority action selected'
-        : ['headroom_derating', 'critical_capacity_derating', 'hard_limit_derating'].includes(action.reason)
-          ? 'Capacity derating selected'
-          : ['headroom_battery_release', 'hard_limit_battery_off'].includes(action.reason)
+        : action.reason === 'hard_limit_operator_override'
+          ? 'HARD LIMIT operator override selected'
+          : ['headroom_derating', 'critical_capacity_derating', 'hard_limit_derating'].includes(action.reason)
+            ? 'Capacity derating selected'
+            : ['headroom_battery_release', 'hard_limit_battery_off'].includes(action.reason)
             ? 'Battery released for capacity protection'
             : 'Best one-step balancing action selected',
       [
@@ -897,6 +988,7 @@ const toggleAuto = () => {
     return;
   }
   agentState.value = 'inactive';
+  setHardLimitOverride({ active: false });
   addLog(
     'Agent inactive',
     hasPendingDevice.value
@@ -907,6 +999,10 @@ const toggleAuto = () => {
 };
 
 watch([() => props.vuf, capacityUsageRatio], () => {
+  if (hardLimitOverrideActive.value && (capacityUsageRatio.value === null || capacityUsageRatio.value < hardRatio.value)) {
+    setHardLimitOverride({ active: false });
+    addLog('HARD LIMIT override released', 'Building Capacity is below the hard boundary again. Operator Adjustability is the active boundary for future automatic actions; no automatic upshift is performed.', 'success');
+  }
   if (!autoEnabled.value) return;
   if (['monitoring', 'blocked', 'critical_unresolved'].includes(agentState.value)) evaluateAgent();
 });
@@ -976,9 +1072,9 @@ const requestHeatpumpZeroHold = () => {
 };
 
 onMounted(() => { timer.value = window.setInterval(evaluateAgent, TICK_MS); });
-onUnmounted(() => { if (timer.value) window.clearInterval(timer.value); });
+onUnmounted(() => { if (timer.value) window.clearInterval(timer.value); setHardLimitOverride({ active: false }); });
 </script>
 
 <style scoped>
-.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.dot.critical_unresolved,.log-dot.critical{background:var(--red)}.dot.pending{background:#ffd166;box-shadow:0 0 12px rgba(255,209,102,.45)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.critical-unresolved-blink{color:var(--red);animation:vuf-critical-unresolved-blink 1s infinite}@keyframes vuf-critical-unresolved-blink{0%,49%{opacity:1}50%,100%{opacity:.25}}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
+.agent-card{--text:#eaf6ff;--muted:#83a7bd;--cyan:#58e7ff;--green:#42e38c;--yellow:#ffd166;--red:#ff5c6c;padding:18px;color:var(--text);border:1px solid #163448;border-radius:20px;background:linear-gradient(180deg,rgba(12,30,44,.96),rgba(6,18,28,.96));box-shadow:0 20px 60px rgba(0,0,0,.34)}.header,.section-head,.condition,.device-head,.cooldown-label{display:flex;align-items:center}.header,.section-head,.device-head,.cooldown-label{justify-content:space-between}.header{align-items:flex-start;gap:16px}.eyebrow,.panel-label{color:#6f9ab1;font-size:10px;letter-spacing:.14em;text-transform:uppercase}h2,h3{margin:4px 0 0}h2{font-size:18px}h3{font-size:14px}.control-toggle{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid #294d62;border-radius:14px;color:#9cb8c9;background:#081721;cursor:pointer}.control-toggle.enabled{border-color:rgba(66,227,140,.55);color:#eafff4;background:rgba(21,75,59,.35)}.control-toggle:disabled,.off-button:disabled,.binary:disabled{cursor:not-allowed;opacity:.45}.control-toggle strong,.control-toggle small{display:block}.control-toggle strong{font-size:11px}.control-toggle small{margin-top:2px;color:#6f91a3;font-size:9px}.toggle-track{position:relative;width:42px;height:24px;border:1px solid #315369;border-radius:999px;background:#0b1a25}.toggle-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#6f91a3;transition:left .2s ease,background .2s ease}.enabled .toggle-knob{left:21px;background:var(--green)}.status-grid,.devices{display:grid;gap:10px}.status-grid{grid-template-columns:1fr 1fr;margin-top:16px}.devices{grid-template-columns:repeat(3,1fr)}.feedback-lines{display:grid;gap:3px;margin-top:8px;color:#6f91a3;font-size:9px}.panel,.device{padding:13px;border:1px solid #17384b;border-radius:14px;background:#081721}.device.pending{border-color:#ffd166;box-shadow:0 0 0 1px rgba(255,209,102,.25),0 0 20px rgba(255,209,102,.08)}.device.unknown{border-style:dashed;opacity:.88}.condition{gap:8px;margin-top:10px}.dot,.log-dot{width:8px;height:8px;border-radius:50%;background:#698a9c}.balanced,.success{color:var(--green)}.warning{color:var(--yellow)}.critical{color:var(--red)}.unknown{color:#789aac}.dot.balanced,.log-dot.success,.log-dot.monitoring{background:var(--green)}.dot.warning,.log-dot.warning{background:var(--yellow)}.dot.critical,.dot.critical_unresolved,.log-dot.critical{background:var(--red)}.dot.pending{background:#ffd166;box-shadow:0 0 12px rgba(255,209,102,.45)}.dot.adjusting,.log-dot.action{background:var(--cyan)}.dot.inactive,.log-dot.inactive,.dot.blocked{background:#698a9c}.vuf-value{margin-top:10px;font-size:30px;font-weight:900}.critical-unresolved-blink{color:var(--red);animation:vuf-critical-unresolved-blink 1s infinite}@keyframes vuf-critical-unresolved-blink{0%,49%{opacity:1}50%,100%{opacity:.25}}.vuf-prediction{margin-left:8px;color:var(--yellow);font-size:16px}.thresholds,.panel p{color:#6f91a3;font-size:9px}.section-head{margin:18px 0 10px}.decision-badges{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}.badge{padding:5px 8px;border:1px solid #284b60;border-radius:999px;color:#a7c8d8;font-size:10px}.pending-badge,.pending-note{color:#ffd166}.pending-note{display:block;margin:-4px 0 8px;font-size:10px;letter-spacing:.03em}.device-value{font-size:26px;font-weight:900}.device-value small{font-size:12px;color:#83a7bd}.segments{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}.segments.three{grid-template-columns:repeat(3,1fr)}.level-button{height:8px;border:0;border-radius:999px;background:#143042;cursor:pointer}.level-button.active{background:var(--cyan);box-shadow:0 0 10px rgba(88,231,255,.45)}.level-button:disabled{cursor:not-allowed;opacity:.5}.off-button{margin-top:8px;margin-right:5px;padding:5px 8px;border:1px solid #285369;border-radius:7px;background:#0b2635;color:#dff7ff;cursor:pointer;font-size:10px}.off-button.active{border-color:#58e7ff;color:#58e7ff}.zero-hold-button{border-color:#365b70}.binary{margin-top:10px;padding:7px 12px;border:1px solid #284b60;border-radius:999px;background:#eaf6ff;color:#0b1a27;font-weight:800}.binary.on{background:#154b3b;color:#8ff1c3;border-color:#42e38c}.clickable{cursor:pointer}.cooldown{margin-top:12px}.cooldown-track{height:6px;border-radius:999px;background:#102b3b;overflow:hidden}.cooldown-fill{height:100%;background:var(--cyan)}.log{max-height:160px;overflow:auto}.log-entry{display:grid;grid-template-columns:70px 12px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #123042;font-size:11px}.log time,.log p,.empty{color:#6f91a3}.log p{margin:2px 0 0}.empty{text-align:center;padding:20px}.hard-limit-override-alert{display:grid;gap:4px;margin-top:10px;padding:10px 12px;border:1px solid #ff5c6c;border-radius:12px;background:rgba(92,20,30,.35);color:#ffd7db;font-size:11px;line-height:1.45}.hard-limit-override-alert strong{color:#ff8c97;font-size:12px}.hard-limit-override-alert span:last-child{color:#ffb6bd}@media(max-width:760px){.status-grid,.devices{grid-template-columns:1fr}.header{flex-direction:column}}
 </style>

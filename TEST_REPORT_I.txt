@@ -1,0 +1,55 @@
+Senergate v1.5.1 AI CONTROL I - TEST REPORT
+Date: 2026-09-17
+Variant: HARD_LIMIT_OPERATOR_OVERRIDE
+
+BASE
+- Direct base: AI CONTROL H MINIMAL_HEADROOM_UI_PATCH
+- Minimal patch: only AgentCard control fallback + SimpleDashboard warning state/UI + regression tests/version marker
+- Branch A/B firmware, MQTT contracts, Capacity formulas and Building-Twin model unchanged
+
+IMPLEMENTED FIX
+1. Operator Adjustability remains binding below Capacity HARD limit.
+2. At Capacity >= hardRatio, normal operator-permitted capacity-reducing actions are still tried first.
+3. If no capacity-reducing action remains inside Operator Adjustability, Heatpump/Wallbox may downshift one additional level below the configured operator floor.
+4. Override never commands Heatpump STOP/ZERO_HOLD or Wallbox OFF; Level 1 remains the automatic minimum.
+5. Saved Heatpump/Wallbox Adjustability values are never rewritten.
+6. One-step, downshift-only, voltage guard, execution confirmation and settling are preserved.
+7. Battery ON->OFF remains available through the normal HARD-limit candidate path; Battery OFF->ON remains blocked by existing hard-capacity guard.
+8. Runtime warning is emitted to the dashboard with asset, configured floor/LOCKED state and emergency target level.
+9. Capacity panel, Operator Adjustability panel and Agent card show HARD LIMIT OVERRIDE warnings.
+10. Runtime override is cleared when Building Capacity drops below the hard boundary or AI control is switched off; no automatic upshift is performed.
+
+REGRESSION TESTS
+- tests/*.mjs: 48 PASS / 0 FAIL
+- New: hard_limit_operator_override_static_test.mjs
+
+SYNTAX CHECKS
+- AgentCard.vue <script setup>: PASS
+- SimpleDashboard.vue <script setup>: PASS
+- VufCard.vue <script setup>: PASS
+- CapacitySupervisor.js: PASS
+- ControlPolicyConfig.js: PASS
+- ElectricalProfileModel.js: PASS
+
+MINIMAL-DIFF CHECK
+Production source files changed relative to AI CONTROL H:
+- client/src/components/AgentCard.vue
+- client/src/components/SimpleDashboard.vue
+No server, ESP32, MQTT, BuildingTwinModel, CapacitySupervisor, ControlPolicyConfig or ElectricalProfileModel production logic changed.
+
+PRODUCTION BUILD
+- Not executed in this isolated workspace because client/node_modules is not present.
+- Before deployment on Pi5/dev system: cd client && npm ci && npm run build
+
+PRESERVED INVARIANTS
+- Heatpump automatic upshift: forbidden
+- Wallbox automatic upshift: forbidden
+- Hard override: downshift only, one level per cycle
+- Heatpump auto minimum during override: L1 (no STOP/ZERO_HOLD introduced)
+- Wallbox auto minimum during override: L1 (no OFF introduced)
+- Battery remains bidirectional
+- Voltage guard mandatory
+- One device change per control cycle
+- Pending -> Confirmed -> Settling unchanged
+- Operator Adjustability values remain stored unchanged
+- CUF/Schieflast remain inactive triggers

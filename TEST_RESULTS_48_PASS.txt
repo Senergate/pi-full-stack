@@ -1,0 +1,3 @@
+AI CONTROL I regression suite
+48 PASS / 0 FAIL
+New coverage: hard_limit_operator_override_static_test.mjs

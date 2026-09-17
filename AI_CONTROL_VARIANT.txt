@@ -1,13 +1,3 @@
-Senergate v1.5.1 AI CONTROL H
-Variant: MINIMAL_HEADROOM_UI_PATCH
-Base: AI CONTROL G BUILDING_CAPACITY_OPERATOR_UX
-
-Control invariants:
-- Heatpump AI: downshift-only
-- Wallbox AI: downshift-only
-- Battery: bidirectional OFF <-> ON
-- Capacity: Building-Twin MODELED basis
-- Capacity >= Pre-Limit may trigger control independently of VUF threshold
-- Candidate Capacity is predicted before execution
-- Voltage guard and one-step execution remain active
-- CUF/Schieflast are not active triggers
+Senergate v1.5.1 AI CONTROL I
+Variant: HARD_LIMIT_OPERATOR_OVERRIDE
+Base: AI CONTROL H MINIMAL_HEADROOM_UI_PATCH
