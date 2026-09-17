@@ -1,0 +1,29 @@
+Senergate v1.5.1 AI CONTROL E - Test Report
+Date: 2026-09-17
+
+Scope:
+- Monotonic downshift invariant for automatic Heatpump/Wallbox control
+- Heatpump Adjustability >90 => LOCKED
+- Battery remains bidirectional OFF/ON
+- Existing AI CONTROL D regressions retained
+
+Automated Node tests:
+PASS: 38
+FAIL: 0
+
+Syntax checks:
+PASS client/src/ControlPolicyConfig.js
+PASS client/src/CapacitySupervisor.js
+PASS client/src/components/AgentCard.vue <script setup>
+PASS client/src/components/SimpleDashboard.vue <script setup>
+PASS client/src/components/VufCard.vue <script setup>
+
+Key invariant checks:
+- No automatic Heatpump upshift candidate
+- No automatic Wallbox upshift candidate
+- Battery OFF->ON candidate retained
+- Final pre-emit monotonic guard present
+- Heatpump 90 => min L5; 91 => LOCKED
+- Wallbox 90 => min L2; 91 => LOCKED
+
+Full production Vite build was not required for these source-level regression checks. Run npm build and real-hardware bench validation on the Pi5 before deployment.

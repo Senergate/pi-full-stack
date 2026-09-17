@@ -8,7 +8,10 @@ import {
 assert.deepEqual(heatpumpAdjustabilityRule(1), { percent: 1, locked: false, minLevel: 1 });
 assert.deepEqual(heatpumpAdjustabilityRule(20), { percent: 20, locked: false, minLevel: 1 });
 assert.deepEqual(heatpumpAdjustabilityRule(21), { percent: 21, locked: false, minLevel: 2 });
-assert.deepEqual(heatpumpAdjustabilityRule(99), { percent: 99, locked: false, minLevel: 5 });
+assert.deepEqual(heatpumpAdjustabilityRule(80), { percent: 80, locked: false, minLevel: 4 });
+assert.deepEqual(heatpumpAdjustabilityRule(81), { percent: 81, locked: false, minLevel: 5 });
+assert.deepEqual(heatpumpAdjustabilityRule(90), { percent: 90, locked: false, minLevel: 5 });
+assert.deepEqual(heatpumpAdjustabilityRule(91), { percent: 91, locked: true, minLevel: null });
 assert.deepEqual(heatpumpAdjustabilityRule(100), { percent: 100, locked: true, minLevel: null });
 
 assert.deepEqual(wallboxAdjustabilityRule(30), { percent: 30, locked: false, minLevel: 1 });

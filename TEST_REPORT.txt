@@ -1,31 +1,44 @@
-Senergate v1.5.1 AI CONTROL C — TEST REPORT
+Senergate v1.5.1 AI CONTROL D — TEST REPORT
 
-Automated Node/static/model tests: 35 PASS / 0 FAIL
+Automated Node/static/model tests: 37 PASS / 0 FAIL
+
 JavaScript syntax checks:
-- client/src/ControlPolicyConfig.js: PASS
 - client/src/CapacitySupervisor.js: PASS
 - extracted <script setup> from SimpleDashboard.vue: PASS
 - extracted <script setup> from AgentCard.vue: PASS
 - extracted <script setup> from VufCard.vue: PASS
 
-New tests include:
-- capacity/adjustability static contract
-- capacity formula static contract
-- CapacitySupervisor behavioral checks
-- Wallbox break-before-make sequencing
+New D-specific tests:
+- Capacity live P/L1/L2/L3 metrics remain present when all hard limits are 0.
+- Partial Capacity limit configuration works; only configured valid metrics enter Usage.
+- L2 95% example classifies as CRITICAL.
+- Grid Impedance independent accordion contract.
+- Advanced Control accordion contract.
+- VUF chart single-point/constant-value continuation static contract.
+
+Regression tests retained:
+- Capacity / adjustability contracts
+- Capacity formula
+- Battery-priority / headroom derating
+- CRITICAL_UNRESOLVED
+- Wallbox break-before-make
+- Branch A command/feedback semantics
+- VUF presentation consistency
+- Startup / real-hardware gates
 
 Not executed in this environment:
-- Full Vite production build. npm dependency installation could not be completed in the execution environment.
+- Full Vite production build: npm --offline could not install all lockfile dependencies (missing cached package xmlhttprequest-ssl-2.1.2).
+- Browser rendering test.
 - Real-hardware HIL/bench validation.
 
 Required bench checks before field use:
-1. Capacity limit 0 => no Capacity guard intervention.
-2. Configure P/L1/L2/L3 limits and verify limiting constraint selection.
-3. Verify 80/90/95/100 state transitions.
-4. Heatpump adjustability mapping at 20/21/40/41/60/61/80/81/99/100.
-5. Wallbox mapping at 30/31/90/91/100.
-6. Wallbox Level 2 -> Level 1: OFF old relay before ON new relay.
-7. Battery ON + PRE-LIMIT + HP/WB floor => Battery release.
-8. HP/WB floor + Battery cannot exit VUF critical => CRITICAL_UNRESOLVED + 1 s VUF blink.
-9. Any state change / threshold change from CRITICAL_UNRESOLVED triggers reevaluation.
-10. Branch-A STOP/SAFE_MODE/FAULT behavior remains unchanged.
+1. Limits=0 => Capacity guard inactive, but P/L1/L2/L3 live values remain visible.
+2. Partial limit: Pmax only => Capacity Usage follows P/Pmax.
+3. Grid Impedance can collapse independently; Capacity/AI sections remain visible.
+4. Advanced Parameters can collapse independently; values/control behavior are unchanged.
+5. Constant VUF for >15 s => horizontal VUF line remains visible.
+6. Configure P/L1/L2/L3 limits and verify limiting constraint selection.
+7. Verify 80/90/95/100 state transitions.
+8. HP/WB adjustability floors still block illegal derating.
+9. Battery ON + PRE-LIMIT + HP/WB floor => Battery release.
+10. CRITICAL_UNRESOLVED => VUF red blink with 1 s period.

@@ -1,16 +1,13 @@
-Senergate v1.5.1 AI CONTROL C — Capacity Supervisor + Asset Adjustability
-Source: v1.5.1 AI CONTROL B Battery Priority, derived from Baseline v1.5.1 Bugfix.
+Senergate v1.5.1 AI CONTROL E — MONOTONIC DOWNSHIFT
 
-Main changes:
-- Capacity Usage + Remaining Headroom supervisor with P/L1/L2/L3 hard-limit inputs.
-- 100% = configured project hard limit; site limits default 0=disabled.
-- Collapsible Capacity display embedded inside the existing Grid-Impedance / AI-control panel.
-- Heatpump adjustability 1..100 mapping to minimum allowed AI level.
-- Wallbox adjustability 1..100 mapping to minimum allowed AI level / lock.
-- Battery Effective Threshold remains configurable; default 0.10 A.
-- Capacity PRE-LIMIT derating respects operator adjustability boundaries.
-- Battery charging is released if PRE-LIMIT is reached and HP/WB legal derating is exhausted.
-- CRITICAL_UNRESOLVED state when HP + Wallbox are at their permitted floors and Battery cannot exit VUF critical.
-- VUF flashes red with a 1-second period in CRITICAL_UNRESOLVED.
-- Wallbox cross-mask changes use break-before-make command ordering (OFF before ON).
-- CUF/Schieflast active control intentionally remains deferred.
+Base: AI CONTROL D (Live Capacity UI + VUF History Fix)
+
+New invariant:
+- Automatic AI control may only DECREASE Heatpump and Wallbox levels.
+- Automatic Heatpump/Wallbox upshift or restoration is forbidden.
+- Battery remains bidirectional OFF <-> ON.
+- Manual/operator device control remains bidirectional when automatic control is disabled.
+- Heatpump adjustability mapping: 1-20=>L1, 21-40=>L2, 41-60=>L3, 61-80=>L4, 81-90=>L5, 91-100=>LOCKED.
+- Wallbox mapping unchanged: 1-30=>L1, 31-90=>L2, 91-100=>LOCKED.
+
+CUF/Schieflast are still NOT active control triggers in this revision. Existing VUF control triggering remains unchanged.

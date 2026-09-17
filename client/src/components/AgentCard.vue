@@ -10,7 +10,7 @@
         <span class="toggle-track"><span class="toggle-knob" /></span>
         <span>
           <strong>{{ autoEnabled ? 'AI CONTROL ON' : 'AI CONTROL OFF' }}</strong>
-          <small>{{ autoEnabled ? 'Battery-priority VUF control · voltage/headroom guards' : 'Operator control' }}</small>
+          <small>{{ autoEnabled ? 'Battery-priority VUF control · HP/WB downshift-only · voltage/headroom guards' : 'Operator control' }}</small>
         </span>
       </button>
     </div>
@@ -448,12 +448,20 @@ const getReductionCandidates = current => {
 };
 
 const getCompensationCandidates = current => {
+  // AI_CONTROL_INVARIANT:
+  // Heatpump and Wallbox are monotonic non-increasing under automatic control.
+  // They may only stay at the current executed level or step DOWN by one level.
+  // Automatic upshift/recovery is forbidden. Battery remains the only
+  // bidirectional balancing actuator (OFF <-> ON).
   const candidates = [];
-  if (current.heatpump === 0) candidates.push({ ...current, heatpump: 1 });
-  if ((current.wallbox & 1) === 0) candidates.push({ ...current, wallbox: current.wallbox | 1 });
-  if ((current.wallbox & 2) === 0) candidates.push({ ...current, wallbox: current.wallbox | 2 });
   if (!current.batteryCharging) candidates.push({ ...current, batteryCharging: true });
   return candidates;
+};
+
+const automaticCandidateRespectsMonotonicRule = (current, candidate) => {
+  if (candidate.heatpump > current.heatpump) return false;
+  if (candidate.wallbox > current.wallbox) return false;
+  return true;
 };
 
 
@@ -520,7 +528,10 @@ const chooseNextAction = async () => {
   if (!Number.isFinite(currentVuf)) return null;
 
   const evaluateBest = async candidates => {
-    const best = await evaluateCandidates(dedupeStates(candidates));
+    const monotonicCandidates = dedupeStates(candidates).filter(candidate =>
+      automaticCandidateRespectsMonotonicRule(current, candidate)
+    );
+    const best = await evaluateCandidates(monotonicCandidates);
     if (!best || best.vuf >= currentVuf - minImprovement.value) return null;
     return best;
   };
@@ -634,13 +645,28 @@ const selectAndApplyState = async repeatedViolation => {
         );
       } else {
         agentState.value = 'monitoring';
-        addLog('No permitted adjustment found', 'No voltage-safe one-step reduction or compensation action is currently predicted to improve VUF.', 'warning');
+        addLog('No permitted adjustment found', 'No voltage-safe permitted one-step action is currently predicted to improve VUF. Heatpump/Wallbox automatic upshift is forbidden.', 'warning');
       }
       return;
     }
 
     prediction.value = action;
     const current = normalizedDeviceStates.value;
+
+    // Final execution-boundary invariant. Even if a future candidate source is
+    // added without the normal candidate filter, automatic control must never
+    // increase Heatpump or Wallbox above the currently executed level.
+    if (!automaticCandidateRespectsMonotonicRule(current, action.state)) {
+      prediction.value = null;
+      agentState.value = 'blocked';
+      addLog(
+        'Automatic upshift blocked',
+        'AI attempted to increase Heatpump or Wallbox. The monotonic downshift invariant blocked the command before emit().',
+        'critical'
+      );
+      return;
+    }
+
     const patch = {};
     for (const key of ['heatpump', 'wallbox', 'batteryCharging']) {
       if (action.state[key] !== current[key]) patch[key] = action.state[key];

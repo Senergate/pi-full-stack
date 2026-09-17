@@ -13,7 +13,7 @@
  */
 
 export const CONTROL_POLICY_DEFAULTS = Object.freeze({
-  strategy: 'battery_priority_capacity_adjustability_v2',
+  strategy: 'battery_priority_capacity_monotonic_downshift_v3',
 
   // VUF-only first implementation. CUF/Schieflast control is intentionally
   // deferred to a later architecture revision.
@@ -43,7 +43,9 @@ export const CONTROL_POLICY_DEFAULTS = Object.freeze({
   // Operator-defined intervention depth. These are operational constraints,
   // not electrical hard limits and not AI-learnable parameters.
   // Heatpump: 1-20=>min L1, 21-40=>L2, 41-60=>L3, 61-80=>L4,
-  // 81-99=>L5, 100=>locked. 50 preserves the previous effective min L3.
+  // 81-90=>L5, 91-100=>locked. 50 preserves the previous effective min L3.
+  // Automatic AI control is monotonic downshift-only: it may never increase
+  // Heatpump or Wallbox level. Manual/operator commands remain bidirectional.
   heatpumpAdjustability: 50,
   // Wallbox: 1-30=>min L1, 31-90=>min L2, 91-100=>locked.
   // 30 is the most permissive setting under the new no-auto-OFF rule.
